@@ -1,0 +1,415 @@
+# Recall Engine - BDD Requirements
+
+## Overview
+
+`recall-engine` is a Python CLI that lets an agent CLI (`claude`,
+`codex`, `pi`, `gemini`, `opencode`, or `agy`) use a local Markdown
+knowledge base.
+
+The tool prepares a knowledge repo, links the repo's `src/` into the current
+project as `.knowledge` (so sandboxed agents can reach an out-of-project repo
+through an in-project path), injects a temporary Agent Skills skill into
+the current project (SSOT at `.agents/skills/`, with symlinks for the other
+agents' skills dirs), launches the agent, and restores the project after the
+session ends. It also supports one-way sync between a Google Drive folder and
+the knowledge repo's `src/` directory.
+
+## Current Codebase Facts
+
+- The project is a Python 3.10+ package.
+- The package uses a `src/` layout with import package `recall_engine`.
+- The CLI entry point is `recall-engine`.
+- The CLI is built with Typer.
+- Google Drive access uses `google-api-python-client` and `google-auth`.
+- The implemented commands are `wrap`, `unwrap`, `sync`, and `doctor`.
+- The project uses `uv run pytest` and `uv run ruff check src tests` for checks.
+- No JavaScript, TypeScript, webpack, Vite, or Next.js config is present.
+
+## Feature: Configure a Knowledge Repo
+
+The CLI must resolve one knowledge repo before it can wrap an agent or sync
+Drive files.
+
+Scenario: use a local repo
+- Given `KNOWLEDGE_REPO_PATH` points to an existing directory
+- When the user runs a command that needs the knowledge repo
+- Then the CLI uses that directory as the knowledge repo
+- And downstream behavior receives the resolved absolute path
+
+Scenario: clone a repo from SSH
+- Given `KNOWLEDGE_REPO_SSH` is set
+- And `./.recall` does not exist
+- When the user runs a command that needs the knowledge repo
+- Then the CLI clones the SSH repo into `./.recall`
+
+Scenario: update an existing SSH clone
+- Given `KNOWLEDGE_REPO_SSH` is set
+- And `./.recall` already exists as a git repo with the same origin
+- When the user runs a command that needs the knowledge repo
+- Then the CLI runs `git pull --ff-only`
+- And if pull fails, it warns and continues with the existing checkout
+
+Scenario: reject an unsafe existing clone target
+- Given `KNOWLEDGE_REPO_SSH` is set
+- And `./.recall` exists but is not a git repo
+- When the CLI prepares the knowledge repo
+- Then the command fails with a clear error
+
+Scenario: reject an origin mismatch
+- Given `./.recall` is a git repo
+- And its origin does not match `KNOWLEDGE_REPO_SSH`
+- When the CLI prepares the knowledge repo
+- Then the command fails
+- And it must not overwrite the directory
+
+Scenario: reject ambiguous repo settings
+- Given both `KNOWLEDGE_REPO_PATH` and `KNOWLEDGE_REPO_SSH` are set
+- When the CLI resolves configuration
+- Then the command fails with a configuration error
+
+Scenario: inherit the repo from a live wrap session
+- Given a wrap session is already running in the same project directory
+- And neither `KNOWLEDGE_REPO_PATH` nor `KNOWLEDGE_REPO_SSH` is set
+- When the user starts another `recall-engine wrap <agent>` there
+- Then the CLI reuses the running session's knowledge repo
+- And it attaches to the existing skill injection
+
+Scenario: reject missing repo settings
+- Given neither `KNOWLEDGE_REPO_PATH` nor `KNOWLEDGE_REPO_SSH` is set
+- And no live wrap session exists in the current directory
+- When the CLI resolves configuration
+- Then the command fails with a configuration error
+
+## Feature: Resolve SSH Access
+
+SSH mode must use a predictable key and avoid hidden ssh-agent dependency.
+
+Scenario: use an explicit SSH key
+- Given `SSH_KEY` points to an existing file
+- When the CLI runs git in SSH mode
+- Then it sets `GIT_SSH_COMMAND` to use that key
+- And it includes `IdentitiesOnly=yes`
+
+Scenario: auto-detect an SSH key
+- Given `SSH_KEY` is not set
+- When the CLI needs an SSH key
+- Then it checks `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, and `~/.ssh/id_rsa`
+- And it uses the first existing key in that order
+
+Scenario: fail when no SSH key exists
+- Given SSH mode is configured
+- And no supported key exists
+- When the CLI prepares the repo
+- Then the command fails
+- And the error lists the searched paths
+
+## Feature: Wrap an Agent CLI
+
+`wrap <agent>` must launch a supported agent CLI (`claude`, `codex`, `pi`,
+`gemini`, `opencode`, or `agy`) with a temporary knowledge skill.
+
+Scenario: launch a supported agent with knowledge context
+- Given a valid knowledge repo is configured
+- And the agent command exists in the user's shell environment
+- When the user runs `recall-engine wrap <agent>` with one of the
+  six supported names
+- Then the CLI injects the knowledge skill (see the skill feature below)
+- And it sets `RECALL_REPO_PATH` to the resolved repo path
+- And it launches the agent through the user's interactive shell
+- And it exits with the agent's exit code
+
+Scenario: classify a wrapper command by version output
+- Given a command such as `claude-company` whose `--version` output contains
+  a known agent signature (`Claude Code` for claude, `codex` for codex)
+- When the user runs `recall-engine wrap claude-company`
+- Then the CLI treats it as a wrapper of that agent family and launches it
+
+Scenario: classify a wrapper command by name token
+- Given a command such as `gemini-company` whose `--version` exits `0` but
+  prints only a bare version number
+- When the CLI classifies the command
+- Then it splits the command name on `-`, `.`, and `_`
+- And a token equal to a supported agent name selects that family
+- And a name like `pip` must not classify as `pi`
+
+Scenario: reject unsupported agents
+- Given the user runs `recall-engine wrap notclaude`
+- And the command matches no agent signature or name token
+- When the CLI validates the agent name
+- Then the command exits with code `2`
+- And the output lists the supported agents
+
+Scenario: restore after launch failure
+- Given the skill was injected
+- And the agent cannot be launched
+- When the launcher fails
+- Then the CLI restores the project skill state before exiting
+
+## Feature: Inject and Restore the Skill
+
+The skill injection must be reversible and safe around interrupted sessions.
+
+Scenario: inject the rendered skill at the Agent Skills SSOT
+- Given the CLI has resolved the knowledge repo path
+- When the wrapper injects the skill
+- Then it writes `.agents/skills/recall-engine/SKILL.md`
+- And the rendered skill points to `<repo>/src/`
+- And it writes `.agents/skills/.recall-engine-marker.json`
+- And the marker records the resolved repo path so a later wrap in the same
+  directory can reuse it without re-specifying the repo env var
+
+Scenario: symlink the skill into the other agents' skills dirs
+- Given the skill was written to `.agents/skills/recall-engine/`
+- When the wrapper finishes injecting
+- Then `.claude/skills/recall-engine`,
+  `.gemini/skills/recall-engine`,
+  `.pi/skills/recall-engine`, and
+  `.opencode/skills/recall-engine` are relative symlinks to it
+- And `codex` and `agy` read `.agents/skills/` directly, so they get no symlink
+- And all symlinks are removed when the session ends
+
+Scenario: link the knowledge base into the project as `.knowledge`
+- Given the CLI has resolved the knowledge repo path
+- When the wrapper injects the skill
+- Then `.knowledge` in the project is a symlink to `<repo>/src`
+- And the rendered skill searches `.knowledge/**/*.md` (an in-project path)
+- And the link is removed when the session ends
+
+Scenario: preserve an existing `.knowledge` entry
+- Given `.knowledge` already exists in the project
+- And it was not created by the active wrapper session
+- When the wrapper injects its skill
+- Then the existing `.knowledge` is moved to a backup location
+- And the original `.knowledge` is restored after the session ends
+
+Scenario: preserve an existing user skill
+- Given `recall-engine/` already exists in the SSOT dir or in an
+  agent-specific skills dir
+- And it was not created by the active wrapper session
+- When the wrapper injects its skill
+- Then the existing entry is moved to a backup location
+- And the original entry is restored after the session ends
+
+Scenario: attach to a live wrapper session in the same directory
+- Given the marker file records a live owner and the skill is injected
+- When another wrap session starts in the same directory with the same repo
+- Then it attaches by adding its process id to the marker
+- And it reuses the existing injection instead of re-injecting
+- And the last session to exit tears the injection down
+
+Scenario: refuse attach on a different repo
+- Given a live wrapper session for one repo
+- When another wrap session starts in the same directory for a different repo
+- Then it fails without disturbing the existing session
+
+Note: wrap sessions in different directories are independent; the marker,
+lock, and injected skill are all anchored per project directory, so sessions
+started from separate directories never block or attach to each other.
+
+Scenario: recover stale wrapper state
+- Given the marker file records a dead process id
+- When a new wrap session starts
+- Then the CLI restores the stale skill state first
+- And the new wrap session may continue
+
+Scenario: manually clean stale wrapper state
+- Given leftover wrapper state exists
+- When the user runs `recall-engine unwrap`
+- Then the CLI restores or removes the injected skill state
+- And the output reports whether anything was cleaned
+
+Scenario: clean leftovers from a pre-SSOT version
+- Given a marker from an older version exists at
+  `.claude/skills/.recall-engine-marker.json`
+- And no marker exists at the SSOT location
+- When the CLI restores skill state
+- Then the legacy skill state is cleaned as well
+
+## Feature: Use the Knowledge Base During Agent Sessions
+
+The injected skill must guide the agent to consult the Markdown knowledge base
+of existing processing records, notes, and prior experience before replying to
+any user message — especially messages about troubleshooting, past work,
+lessons learned, decisions, or terminology.
+
+Scenario: answer with knowledge-base context
+- Given an agent is running through `recall-engine wrap <agent>`
+- And the user sends any message
+- When the agent prepares the reply
+- Then the skill instructs the agent to grep and read `.knowledge/**/*.md` (the
+  in-project link to `<repo>/src`) for existing processing records, notes, or
+  prior handling of similar problems
+- And any prior experience found should be factored into the reply and cite the
+  source file path
+
+Scenario: answer when no matching note exists
+- Given the agent searched `.knowledge/**/*.md`
+- And no relevant note was found
+- When the agent answers the user
+- Then it should say no relevant knowledge-base entry was found
+- And it may continue with general knowledge
+
+Scenario: skip the search for a trivial message
+- Given the user sends a bare greeting or acknowledgement with no
+  searchable keywords (e.g. "hi", "thanks")
+- When the agent prepares the reply
+- Then the skill allows a reply without searching the knowledge base
+
+Scenario: avoid unintended edits
+- Given the agent uses the knowledge repo as reference material
+- When the user has not asked to edit the knowledge repo
+- Then the agent must not modify knowledge repo files
+
+## Feature: Sync from Google Drive to the Knowledge Repo
+
+`sync download` must copy supported Drive files into `<repo>/src/`.
+
+Scenario: download Markdown files
+- Given `KNOWLEDGE_DRIVE_FOLDER` resolves to a Drive folder
+- And the folder contains plain `.md` files
+- When the user runs `recall-engine sync download`
+- Then the CLI writes those files into `<repo>/src/`
+- And local files with the same name are overwritten
+- And unsupported file types are skipped
+
+Scenario: export a native Google Doc
+- Given the Drive folder contains a native Google Doc
+- When the user runs `sync download`
+- Then the CLI exports the document as `text/plain`
+- And it saves the result as `<doc name>.md`
+- And it removes a leading UTF-8 BOM
+- And it normalizes CRLF line endings to LF
+
+Scenario: handle duplicate target names
+- Given multiple Drive files map to the same target filename
+- When the user runs `sync download`
+- Then the file with the newest `modifiedTime` wins
+- And the CLI prints a warning
+
+## Feature: Sync from the Knowledge Repo to Google Drive
+
+`sync upload` must copy top-level Markdown files from `<repo>/src/` to Drive.
+
+Scenario: create or update Drive Markdown files
+- Given `<repo>/src/` contains top-level `.md` files
+- When the user runs `recall-engine sync upload`
+- Then the CLI uploads those files to the configured Drive folder
+- And existing Drive files with the same name are updated
+- And missing Drive files are created
+- And uploads remain plain Markdown files, not native Google Docs
+
+Scenario: reject an empty upload source
+- Given `<repo>/src/` does not exist or contains no `.md` files
+- When the user runs `sync upload`
+- Then the command fails with a Drive sync error
+
+## Feature: Resolve the Google Drive Folder
+
+`KNOWLEDGE_DRIVE_FOLDER` may be either a folder ID or a folder name.
+
+Scenario: use a folder ID
+- Given `KNOWLEDGE_DRIVE_FOLDER` is a Drive folder ID
+- When sync resolves the folder
+- Then the CLI uses that ID directly
+
+Scenario: use a unique folder name
+- Given `KNOWLEDGE_DRIVE_FOLDER` is a folder name
+- And exactly one matching folder exists
+- When sync resolves the folder
+- Then the CLI uses that folder's ID
+
+Scenario: reject an ambiguous folder name
+- Given several Drive folders match the configured name
+- When sync resolves the folder
+- Then the command fails
+- And the output asks the user to set the folder ID instead
+
+## Feature: Authenticate to Google Drive
+
+Drive commands must use credentials that can access the Drive API.
+
+Scenario: use Application Default Credentials
+- Given Application Default Credentials are available with Drive scope
+- When the CLI builds the Drive client
+- Then it uses those credentials
+
+Scenario: fall back to gcloud user credentials
+- Given Application Default Credentials are unavailable
+- And `gcloud auth print-access-token` returns a token
+- When the CLI builds the Drive client
+- Then it uses that token for the current command
+
+Scenario: explain missing Drive credentials
+- Given no usable Drive credentials exist
+- When sync or doctor checks Drive access
+- Then the command fails with actionable `gcloud auth` login commands
+- And it does not print a Python traceback
+
+Scenario: explain insufficient Drive scope
+- Given Drive returns an insufficient-scope error
+- When sync or doctor checks Drive access
+- Then the command fails with actionable `gcloud auth` login commands
+- And it does not print a Python traceback
+
+## Feature: Diagnose Local Setup
+
+`doctor` must report local readiness one check at a time.
+
+Scenario: all required checks pass
+- Given git, at least one agent CLI, SSH key, repo config, and Drive access
+  are available
+- When the user runs `recall-engine doctor`
+- Then each required check prints `[ok]`
+- And the command exits successfully
+
+Scenario: report each agent CLI individually
+- Given some of `claude`, `codex`, `pi`, `gemini`, `opencode`, and `agy` are installed
+- When the user runs `doctor`
+- Then each installed agent prints `[ok]`
+- And each missing agent prints `[skip]`
+- And the agent check passes when at least one agent is installed
+
+Scenario: no agent CLI installed
+- Given none of `claude`, `codex`, `pi`, `gemini`, `opencode`, and `agy` is on `PATH`
+- When the user runs `doctor`
+- Then the agent check prints `[fail]`
+- And the output includes install instructions for the supported agents
+- And the command exits with code `1`
+
+Scenario: a required check fails
+- Given any required dependency is missing or invalid
+- When the user runs `doctor`
+- Then that check prints `[fail]`
+- And the output includes a concrete fix instruction
+- And the command exits with code `1`
+
+Scenario: Drive folder is not configured
+- Given `KNOWLEDGE_DRIVE_FOLDER` is unset
+- When the user runs `doctor`
+- Then the Drive folder check prints `[skip]`
+- And that skip does not make doctor fail
+
+## Out of Scope for v1
+
+- LLM proxying or traffic interception
+- Background daemon mode
+- Two-way Drive merge
+- Delete propagation between Drive and the repo
+- Recursive Drive sync
+- Converting local `.md` uploads into native Google Docs
+- CLI aliases such as `recall` or `rengine`
+- Agent support beyond `claude`, `codex`, `pi`, `gemini`, `opencode`, and `agy`
+
+## Acceptance Checks
+
+Automated:
+- `uv run pytest`
+- `uv run ruff check src tests`
+
+Manual:
+- `recall-engine --help` lists `wrap`, `unwrap`, `sync`, and `doctor`
+- A wrapped agent session reads and cites a relevant file from `<repo>/src/`
+- Drive download writes plain `.md` files and exported Google Docs into
+  `<repo>/src/`
+- Drive upload creates or updates plain Markdown files in the configured Drive
+  folder

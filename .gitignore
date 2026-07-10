@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.tmp/
+
+# Agent runtime skill injection.
+.agents/
+.claude/
+.gemini/
+.pi/
