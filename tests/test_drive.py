@@ -283,7 +283,6 @@ def test_build_drive_service_falls_back_to_gcloud_user_token(monkeypatch):
     assert built["credentials"].token == "tok123"
 def test_cli_sync_without_drive_folder_exits_2(monkeypatch, tmp_path):
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(tmp_path))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.delenv("KNOWLEDGE_DRIVE_FOLDER", raising=False)
     result = runner.invoke(app, ["sync", "download"])
     assert result.exit_code == 2
@@ -292,7 +291,6 @@ def test_cli_sync_download_happy_path(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.setenv("KNOWLEDGE_DRIVE_FOLDER", "folder123")
     calls = {}
     monkeypatch.setattr("recall_engine.cli.build_drive_service", lambda: "service")

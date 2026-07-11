@@ -1,8 +1,8 @@
 # recall-engine
 
 `recall-engine` is a thin launcher that wraps an agent CLI (`claude`,
-`codex`, `pi`, `gemini`, `opencode`, or `agy`) with a git-based Markdown
-knowledge base. It prepares a knowledge repo (local path or SSH clone), starts
+`codex`, `pi`, `gemini`, `opencode`, or `agy`) with an existing local Markdown
+knowledge base. It prepares the knowledge repo, starts
 (or reuses) a shared MCP server that serves the repo's notes, injects a skill
 that makes the agent consult those notes — its record of past processing and
 notes — before replying to any message, points the agent's MCP config at the
@@ -36,12 +36,6 @@ provides the `recall-engine` entry point.
 # local knowledge repo
 KNOWLEDGE_REPO_PATH=~/workspace/recall recall-engine wrap claude
 
-# clone via SSH (default dest ./.recall)
-KNOWLEDGE_REPO_SSH="git@github.com:developer/recall.git" recall-engine wrap claude
-
-# explicit ssh key
-KNOWLEDGE_REPO_SSH="git@github.com:developer/recall.git" SSH_KEY=~/.ssh/id_rsa recall-engine wrap claude
-
 # other agent CLIs
 KNOWLEDGE_REPO_PATH=~/workspace/recall recall-engine wrap codex
 KNOWLEDGE_REPO_PATH=~/workspace/recall recall-engine wrap pi
@@ -58,11 +52,8 @@ environment variables are inherited, so
 `AA=1 recall-engine wrap claude foo --bar` behaves like
 `AA=1 claude foo --bar`:
 
-1. **Prepare the repo** — `KNOWLEDGE_REPO_PATH` is used as-is;
-   `KNOWLEDGE_REPO_SSH` clones to `./.recall` on first run and
-   `git pull --ff-only` afterwards (a failed pull warns and keeps the existing
-   checkout, so wrapping still works offline). The clone dir is added to the
-   host project's `.git/info/exclude`.
+1. **Prepare the repo** — `KNOWLEDGE_REPO_PATH` selects an existing local
+   knowledge repo, and the command fails if the directory is missing.
 2. **Inject the skill** — a rendered `SKILL.md` is written to
    `.agents/skills/recall-engine/` (the Agent Skills SSOT) in the
    current project, and `.claude/skills/`, `.gemini/skills/`, `.pi/skills/`,
@@ -94,11 +85,11 @@ environment variables are inherited, so
 You can run several wrap sessions concurrently in the same project directory:
 the first sets up the injected skill and each later one attaches to it, so the
 skill stays in place until the last session exits. A later session may omit
-`KNOWLEDGE_REPO_PATH` / `KNOWLEDGE_REPO_SSH` entirely — when neither is set, the
-repo is auto-detected from the running session's marker (env vars still win when
-set). Sessions started from different project directories keep independent
-skill injections — the marker, lock, and injected skill are all per-directory,
-so they never block or attach to each other — but they do share one MCP server.
+`KNOWLEDGE_REPO_PATH` — when it is not set, the repo is auto-detected from the
+running session's marker. Sessions started from different project directories
+keep independent skill injections — the marker, lock, and injected skill are
+all per-directory, so they never block or attach to each other — but they do
+share one MCP server.
 
 If the wrapper is killed hard (`kill -9`), the leftover state is detected and
 repaired on the next `wrap`, or clean it manually with `recall-engine unwrap`.
@@ -200,9 +191,7 @@ aborts and asks for the folder ID.
 
 | Variable | Purpose |
 |---|---|
-| `KNOWLEDGE_REPO_PATH` | Path to an existing local knowledge repo (mutually exclusive with `KNOWLEDGE_REPO_SSH`; optional for a second `wrap` in a directory that already has a running session — the repo is auto-detected) |
-| `KNOWLEDGE_REPO_SSH` | SSH URL of the knowledge repo; cloned to `./.recall` |
-| `SSH_KEY` | SSH private key for clone/pull; defaults to auto-detection (`id_ed25519` → `id_ecdsa` → `id_rsa` in `~/.ssh`) |
+| `KNOWLEDGE_REPO_PATH` | Path to an existing local knowledge repo; optional for a later `wrap` in a directory that already has a running session, where the repo is auto-detected |
 | `KNOWLEDGE_DRIVE_FOLDER` | Google Drive folder ID or name (case-insensitive) for `sync download` / `sync upload` |
 
 ## Doctor
@@ -213,7 +202,7 @@ recall-engine doctor
 
 Checks git, the supported agent CLIs on PATH (at least one of
 claude/codex/pi/gemini/opencode/agy must be present; missing ones print
-`[skip]`), the `mcp` package, the shared MCP server, ssh key, repo
+`[skip]`), the `mcp` package, the shared MCP server, repo
 configuration, and gcloud Drive access, printing `[ok]` / `[fail]` per check
 with a fix instruction for each failure. Exits non-zero if any required check
 fails.

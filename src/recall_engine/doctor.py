@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import os
 import shutil
-from pathlib import Path
 
 from recall_engine.agents import AGENTS
 from recall_engine.config import ConfigError, resolve_settings
 from recall_engine.drive import DriveError, build_drive_service, execute
 from recall_engine.mcp_supervisor import server_status
-from recall_engine.repo import RepoError, resolve_ssh_key
 
 
 def _ok(name: str, detail: str) -> None:
@@ -111,28 +109,13 @@ def _report_codex_trust() -> None:
     )
 
 
-def _check_ssh_key() -> bool:
-    ssh_key_env = os.environ.get("SSH_KEY")
-    ssh_key = Path(ssh_key_env).expanduser() if ssh_key_env else None
-    try:
-        key = resolve_ssh_key(ssh_key)
-    except RepoError as exc:
-        _fail("ssh key", "no usable key", str(exc))
-        return False
-    _ok("ssh key", str(key))
-    return True
-
-
 def _check_repo_config() -> bool:
     try:
         settings = resolve_settings()
     except ConfigError as exc:
         _fail("repo config", "not configured", str(exc))
         return False
-    if settings.repo_mode == "path":
-        _ok("repo config", f"path mode: {settings.repo_path}")
-    else:
-        _ok("repo config", f"ssh mode: {settings.repo_ssh_url} -> {settings.repo_path}")
+    _ok("repo config", f"path: {settings.repo_path}")
     return True
 
 
@@ -171,7 +154,6 @@ def run_doctor() -> bool:
         _check_agents(),
         _check_mcp(),
         _check_mcp_server(),
-        _check_ssh_key(),
         _check_repo_config(),
         _check_drive_access(),
     ]

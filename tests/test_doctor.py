@@ -12,11 +12,7 @@ def install_passing_env(monkeypatch, tmp_path) -> None:
     # Never read the host's real /tmp state file: a wrap session running on the
     # dev machine would otherwise leak into the assertions.
     monkeypatch.setattr(doctor, "server_status", lambda: None)
-    key = tmp_path / "id_ed25519"
-    key.write_text("fake key\n")
-    monkeypatch.setenv("SSH_KEY", str(key))
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(tmp_path))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.setenv("KNOWLEDGE_DRIVE_FOLDER", "folder123")
     monkeypatch.setattr(doctor, "build_drive_service", lambda: MagicMock())
     monkeypatch.setattr(doctor, "execute", lambda request: {"files": []})
@@ -32,7 +28,6 @@ def test_all_checks_pass(monkeypatch, tmp_path, capsys):
         "gemini",
         "opencode",
         "agy",
-        "ssh key",
         "repo config",
         "gcloud auth",
     ):
@@ -63,14 +58,14 @@ def test_all_agents_missing_fails_and_exits_1(monkeypatch, tmp_path):
     assert result.exit_code == 1
     assert "[fail] agent CLIs" in result.output
     assert "claude/codex/pi/gemini/opencode/agy" in result.output
-@pytest.mark.parametrize(("case", "fail_name"), (("ssh", "ssh key"), ("repo", "repo config"), ("drive", "gcloud auth")))
+@pytest.mark.parametrize(
+    ("case", "fail_name"),
+    (("repo", "repo config"), ("drive", "gcloud auth")),
+)
 def test_required_doctor_checks_fail(monkeypatch, tmp_path, capsys, case, fail_name):
     install_passing_env(monkeypatch, tmp_path)
-    if case == "ssh":
-        monkeypatch.setenv("SSH_KEY", str(tmp_path / "missing-key"))
-    elif case == "repo":
+    if case == "repo":
         monkeypatch.delenv("KNOWLEDGE_REPO_PATH", raising=False)
-        monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     else:
         def raise_drive_error():
             raise doctor.DriveError("run gcloud auth application-default login")

@@ -68,7 +68,6 @@ def test_wrap_detects_claude_wrapper(monkeypatch, tmp_path):
         name="claude-company",
     )
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "claude-company"])
     assert result.exit_code == 7
@@ -86,7 +85,6 @@ def test_wrap_pi_blocks_without_adapter(monkeypatch, tmp_path):
         name="pi",
     )
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "pi"])
     assert result.exit_code == 2
@@ -107,7 +105,6 @@ def test_wrap_pi_launches_with_adapter(monkeypatch, tmp_path):
         name="pi",
     )
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "pi"])
     assert result.exit_code == 0
@@ -116,7 +113,6 @@ def test_wrap_pi_launches_with_adapter(monkeypatch, tmp_path):
     assert not (project / ".pi" / "mcp.json").exists()
 def test_wrap_claude_repo_error_exits_1(monkeypatch, tmp_path):
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(tmp_path / "missing"))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     result = runner.invoke(app, ["wrap", "claude"])
     assert result.exit_code == 1
 def test_wrap_claude_full_lifecycle(monkeypatch, tmp_path):
@@ -135,7 +131,6 @@ def test_wrap_claude_full_lifecycle(monkeypatch, tmp_path):
         "exit 7",
     )
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "claude"])
     assert result.exit_code == 7
@@ -165,7 +160,6 @@ def test_wrap_injects_and_restores_mcp_config(monkeypatch, tmp_path):
         f'cat "{mcp_json}" > "{probe}"\nexit 0',
     )
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "claude"])
     assert result.exit_code == 0
@@ -187,7 +181,6 @@ def test_wrap_forwards_extra_args_to_agent(monkeypatch, tmp_path):
     out = tmp_path / "args.txt"
     install_fake_claude(tmp_path, monkeypatch, f'echo "$@" > "{out}"\nexit 0')
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "claude", "arg1", "arg2", "--resume"])
     assert result.exit_code == 0
@@ -210,7 +203,6 @@ def test_wrap_gemini_full_lifecycle(monkeypatch, tmp_path):
         name="gemini",
     )
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "gemini"])
     assert result.exit_code == 0
@@ -236,7 +228,6 @@ def test_wrap_opencode_full_lifecycle(monkeypatch, tmp_path):
         name="opencode",
     )
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "opencode"])
     assert result.exit_code == 0
@@ -260,7 +251,6 @@ def test_wrap_agy_full_lifecycle(monkeypatch, tmp_path):
         name="agy",
     )
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "agy"])
     assert result.exit_code == 0
@@ -281,7 +271,6 @@ def test_wrap_agy_launched_with_add_dir(monkeypatch, tmp_path):
     out = tmp_path / "args.txt"
     install_fake_claude(tmp_path, monkeypatch, f'echo "$@" > "{out}"\nexit 0', name="agy")
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "agy", "chat"])
     assert result.exit_code == 0
@@ -298,7 +287,6 @@ def test_wrap_claude_attaches_to_live_session(monkeypatch, tmp_path):
     project.mkdir()
     install_fake_claude(tmp_path, monkeypatch, "exit 0")
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     # A first live session already injected the skill for the SAME repo.
     from recall_engine.skill import inject_skill
@@ -327,7 +315,6 @@ def test_wrap_auto_detects_repo_from_live_session(monkeypatch, tmp_path):
     project.mkdir()
     install_fake_claude(tmp_path, monkeypatch, "exit 0")
     monkeypatch.delenv("KNOWLEDGE_REPO_PATH", raising=False)
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     from recall_engine.skill import inject_skill
     inject_skill(repo)  # a first session set up the injection for `repo`
@@ -351,11 +338,10 @@ def test_wrap_without_config_and_no_session_exits_2(monkeypatch, tmp_path):
     project.mkdir()
     install_fake_claude(tmp_path, monkeypatch, "exit 0")
     monkeypatch.delenv("KNOWLEDGE_REPO_PATH", raising=False)
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "claude"])
     assert result.exit_code == 2
-    assert "KNOWLEDGE_REPO_PATH or KNOWLEDGE_REPO_SSH" in result.output
+    assert "set KNOWLEDGE_REPO_PATH" in result.output
 def test_wrap_claude_missing_claude_restores_and_exits_1(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -369,7 +355,6 @@ def test_wrap_claude_missing_claude_restores_and_exits_1(monkeypatch, tmp_path):
     empty.mkdir()
     monkeypatch.setenv("PATH", str(empty))
     monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.delenv("KNOWLEDGE_REPO_SSH", raising=False)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "claude"])
     assert result.exit_code == 1

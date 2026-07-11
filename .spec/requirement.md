@@ -42,72 +42,18 @@ Scenario: use a local repo
 - Then the CLI uses that directory as the knowledge repo
 - And downstream behavior receives the resolved absolute path
 
-Scenario: clone a repo from SSH
-- Given `KNOWLEDGE_REPO_SSH` is set
-- And `./.recall` does not exist
-- When the user runs a command that needs the knowledge repo
-- Then the CLI clones the SSH repo into `./.recall`
-
-Scenario: update an existing SSH clone
-- Given `KNOWLEDGE_REPO_SSH` is set
-- And `./.recall` already exists as a git repo with the same origin
-- When the user runs a command that needs the knowledge repo
-- Then the CLI runs `git pull --ff-only`
-- And if pull fails, it warns and continues with the existing checkout
-
-Scenario: reject an unsafe existing clone target
-- Given `KNOWLEDGE_REPO_SSH` is set
-- And `./.recall` exists but is not a git repo
-- When the CLI prepares the knowledge repo
-- Then the command fails with a clear error
-
-Scenario: reject an origin mismatch
-- Given `./.recall` is a git repo
-- And its origin does not match `KNOWLEDGE_REPO_SSH`
-- When the CLI prepares the knowledge repo
-- Then the command fails
-- And it must not overwrite the directory
-
-Scenario: reject ambiguous repo settings
-- Given both `KNOWLEDGE_REPO_PATH` and `KNOWLEDGE_REPO_SSH` are set
-- When the CLI resolves configuration
-- Then the command fails with a configuration error
-
 Scenario: inherit the repo from a live wrap session
 - Given a wrap session is already running in the same project directory
-- And neither `KNOWLEDGE_REPO_PATH` nor `KNOWLEDGE_REPO_SSH` is set
+- And `KNOWLEDGE_REPO_PATH` is not set
 - When the user starts another `recall-engine wrap <agent>` there
 - Then the CLI reuses the running session's knowledge repo
 - And it attaches to the existing skill injection
 
 Scenario: reject missing repo settings
-- Given neither `KNOWLEDGE_REPO_PATH` nor `KNOWLEDGE_REPO_SSH` is set
+- Given `KNOWLEDGE_REPO_PATH` is not set
 - And no live wrap session exists in the current directory
 - When the CLI resolves configuration
 - Then the command fails with a configuration error
-
-## Feature: Resolve SSH Access
-
-SSH mode must use a predictable key and avoid hidden ssh-agent dependency.
-
-Scenario: use an explicit SSH key
-- Given `SSH_KEY` points to an existing file
-- When the CLI runs git in SSH mode
-- Then it sets `GIT_SSH_COMMAND` to use that key
-- And it includes `IdentitiesOnly=yes`
-
-Scenario: auto-detect an SSH key
-- Given `SSH_KEY` is not set
-- When the CLI needs an SSH key
-- Then it checks `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, and `~/.ssh/id_rsa`
-- And it uses the first existing key in that order
-
-Scenario: fail when no SSH key exists
-- Given SSH mode is configured
-- And no supported key exists
-- When the CLI prepares the repo
-- Then the command fails
-- And the error lists the searched paths
 
 ## Feature: Wrap an Agent CLI
 
@@ -451,8 +397,7 @@ Scenario: explain insufficient Drive scope
 `doctor` must report local readiness one check at a time.
 
 Scenario: all required checks pass
-- Given git, at least one agent CLI, SSH key, repo config, and Drive access
-  are available
+- Given git, at least one agent CLI, repo config, and Drive access are available
 - When the user runs `recall-engine doctor`
 - Then each required check prints `[ok]`
 - And the command exits successfully

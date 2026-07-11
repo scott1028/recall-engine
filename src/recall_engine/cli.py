@@ -189,7 +189,7 @@ def sync(mode: str) -> None:
 
 @app.command()
 def doctor() -> None:
-    """Diagnose ssh key, repo config, gcloud Drive access, and agent CLIs on PATH."""
+    """Diagnose repo config, gcloud Drive access, and agent CLIs on PATH."""
     if not run_doctor():
         raise typer.Exit(1)
 
