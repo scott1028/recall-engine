@@ -94,7 +94,7 @@ def _report_pi_mcp_adapter() -> None:
         return
     print(
         "[note] pi: install the pi-mcp-adapter extension so pi can reach the "
-        "recall-engine MCP server (`pi install pi-mcp-adapter`)"
+        "recall-engine MCP server (`pi install npm:pi-mcp-adapter`)"
     )
 
 

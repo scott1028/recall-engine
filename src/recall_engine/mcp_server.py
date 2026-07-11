@@ -7,27 +7,53 @@ carry an auth token in ``X-Recall-Token``. Notes live under ``<repo>/src/**/*.md
 
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 from pathlib import Path
 
 import uvicorn
 from mcp.server.fastmcp import Context, FastMCP
 
-INSTRUCTIONS = (
-    "This server exposes a knowledge base of past processing, notes, and "
-    "decisions recorded in Markdown. Before replying to the user, call "
-    "search_knowledge with keywords drawn from the user's message, then call "
-    "read_note on the most relevant matches, and cite the returned note path "
-    "in your answer. All tools are read-only."
-)
+from recall_engine.template_renderer import render_template
+
+INSTRUCTIONS = render_template("rules/mcp_server_instructions.md").strip()
 
 MAX_MATCHES = 50
+NOTE_RESOURCE_TEMPLATE = "recall://note/{encoded_path}"
+NOTES_INDEX_RESOURCE = "recall://notes/index"
+ENCODED_NOTE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def encode_note_resource_path(relative_path: str) -> str:
+    """Encode a repo-relative note path for a single URI template segment."""
+    return base64.urlsafe_b64encode(relative_path.encode()).decode().rstrip("=")
+
+
+def decode_note_resource_path(encoded_path: str) -> str:
+    if not ENCODED_NOTE_PATH_PATTERN.fullmatch(encoded_path):
+        raise ValueError(f"invalid encoded note path: {encoded_path}")
+    padding = "=" * (-len(encoded_path) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(f"{encoded_path}{padding}".encode())
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"invalid encoded note path: {encoded_path}") from exc
+    try:
+        relative_path = decoded.decode()
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"invalid encoded note path: {encoded_path}") from exc
+    if not relative_path or "\x00" in relative_path:
+        raise ValueError(f"invalid encoded note path: {encoded_path}")
+    if encode_note_resource_path(relative_path) != encoded_path:
+        raise ValueError(f"invalid encoded note path: {encoded_path}")
+    return relative_path
 
 
 def create_server(token: str | None = None) -> FastMCP:
-    """Build the recall-engine FastMCP server with the three tools registered.
+    """Build the recall-engine server with its search tool and note resources.
 
-    If ``token`` is not None, every tool call rejects requests whose
-    ``X-Recall-Token`` header does not equal ``token``.
+    If ``token`` is not None, every tool and resource request rejects a client
+    whose ``X-Recall-Token`` header does not equal ``token``.
     """
     mcp = FastMCP("recall-engine", stateless_http=True, instructions=INSTRUCTIONS)
 
@@ -47,15 +73,46 @@ def create_server(token: str | None = None) -> FastMCP:
             raise ValueError("invalid or missing X-Recall-Token")
         return repo
 
-    @mcp.tool()
-    def search_knowledge(query: str, ctx: Context) -> list[dict]:
-        """Case-insensitive substring search across <repo>/src/**/*.md."""
-        src = resolve_repo(ctx) / "src"
-        needle = query.lower()
-        matches: list[dict] = []
+    def resolve_note(src: Path, path: str) -> Path:
+        """Resolve a note path and keep access inside <repo>/src."""
+        candidate = Path(path)
+        note = candidate if candidate.is_absolute() else src / candidate
+        note = note.resolve()
+        if note != src and src not in note.parents:
+            raise ValueError(f"path is outside the knowledge repo src/ directory: {path}")
+        if not note.is_file():
+            raise ValueError(f"note not found: {path}")
+        return note
+
+    def note_resource_uri(src: Path, note: Path) -> str:
+        relative_path = note.relative_to(src).as_posix()
+        return f"recall://note/{encode_note_resource_path(relative_path)}"
+
+    def note_index_entry(src: Path, note: Path) -> dict[str, str]:
+        return {
+            "path": str(note),
+            "relative_path": note.relative_to(src).as_posix(),
+            "resource_uri": note_resource_uri(src, note),
+        }
+
+    def iter_note_paths(src: Path) -> list[Path]:
+        notes: list[Path] = []
         for note in sorted(src.rglob("*.md")):
             if not note.is_file():
                 continue
+            resolved = note.resolve()
+            if resolved != src and src not in resolved.parents:
+                continue
+            notes.append(note)
+        return notes
+
+    @mcp.tool()
+    def search_knowledge(query: str, ctx: Context) -> list[dict]:
+        """Case-insensitive substring search across <repo>/src/**/*.md."""
+        src = (resolve_repo(ctx) / "src").resolve()
+        needle = query.lower()
+        matches: list[dict] = []
+        for note in iter_note_paths(src):
             for lineno, line in enumerate(
                 note.read_text(encoding="utf-8", errors="replace").splitlines(),
                 start=1,
@@ -66,30 +123,42 @@ def create_server(token: str | None = None) -> FastMCP:
                             "path": str(note),
                             "line": lineno,
                             "snippet": line.strip(),
+                            "resource_uri": note_resource_uri(src, note),
                         }
                     )
                     if len(matches) >= MAX_MATCHES:
                         return matches
         return matches
 
-    @mcp.tool()
-    def read_note(path: str, ctx: Context) -> str:
-        """Return a note's full text; path must resolve inside <repo>/src."""
+    # Add list/read tool adapters only if a supported client cannot use MCP resources.
+    @mcp.resource(
+        NOTES_INDEX_RESOURCE,
+        name="notes_index",
+        title="Recall Engine Notes Index",
+        description=render_template("resources/notes_index_description.md.j2").strip(),
+        mime_type="application/json",
+    )
+    def notes_index() -> list[dict[str, str]]:
+        """List Markdown notes in the selected recall-engine knowledge repo."""
+        ctx = mcp.get_context()
         src = (resolve_repo(ctx) / "src").resolve()
-        candidate = Path(path)
-        note = candidate if candidate.is_absolute() else src / candidate
-        note = note.resolve()
-        if note != src and src not in note.parents:
-            raise ValueError(f"path is outside the knowledge repo src/ directory: {path}")
-        if not note.is_file():
-            raise ValueError(f"note not found: {path}")
-        return note.read_text(encoding="utf-8", errors="replace")
+        return [
+            note_index_entry(src, note)
+            for note in iter_note_paths(src)
+        ]
 
-    @mcp.tool()
-    def list_notes(ctx: Context) -> list[str]:
-        """Return the sorted *.md file paths under <repo>/src, recursively."""
-        src = resolve_repo(ctx) / "src"
-        return sorted(str(note) for note in src.rglob("*.md") if note.is_file())
+    @mcp.resource(
+        NOTE_RESOURCE_TEMPLATE,
+        name="note",
+        title="Recall Engine Note",
+        description="Read one Markdown note from the selected recall-engine knowledge repo.",
+        mime_type="text/markdown",
+    )
+    def note(encoded_path: str, ctx: Context) -> str:
+        """Read one Markdown note from the selected recall-engine knowledge repo."""
+        src = (resolve_repo(ctx) / "src").resolve()
+        note_path = decode_note_resource_path(encoded_path)
+        return resolve_note(src, note_path).read_text(encoding="utf-8", errors="replace")
 
     return mcp
 

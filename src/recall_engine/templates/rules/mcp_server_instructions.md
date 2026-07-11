@@ -1,0 +1,5 @@
+- Treat this server as a read-only knowledge base of past processing, notes, and decisions recorded in Markdown.
+- Before replying to the user, call `search_knowledge` with keywords drawn from the user's message.
+- Read the most relevant returned `resource_uri`.
+- Cite the returned note path in the answer.
+- Treat the tool and resources as read-only.

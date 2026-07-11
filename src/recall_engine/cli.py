@@ -83,7 +83,7 @@ def wrap(ctx: typer.Context, agent: str) -> None:
         typer.echo(
             f"pi is missing the {PI_MCP_ADAPTER} extension, which it needs to "
             "reach the recall-engine MCP server. Install it and re-run:\n"
-            f"    pi install {PI_MCP_ADAPTER}",
+            f"    pi install npm:{PI_MCP_ADAPTER}",
             err=True,
         )
         raise typer.Exit(2)

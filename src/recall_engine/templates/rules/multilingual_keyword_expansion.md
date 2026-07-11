@@ -1,0 +1,6 @@
+- Before calling `search_knowledge` or reading `recall://notes/index`, predict useful expansion keywords from the user's intent, including related concepts, synonyms, abbreviations, exact technical terms, and likely Chinese/English equivalents.
+- Split compound phrases into shorter search terms and search both the exact phrase and the useful individual terms separately.
+- Expand each user keyword with a small set of likely multilingual equivalents, including the user's original language and English technical terms.
+- Call `search_knowledge` separately for each original or expanded keyword.
+- If content search is inconclusive, compare those keywords against note filenames from `recall://notes/index`.
+- Read likely filename matches because filenames are content-derived and may reflect note content.

@@ -11,11 +11,11 @@ import os
 import shutil
 import sys
 from datetime import datetime, timezone
-from importlib.resources import files
 from pathlib import Path
 
 from recall_engine.agents import AGENTS, SKILLS_SSOT_DIR
 from recall_engine.state import atomic_write_json, file_lock, is_pid_alive
+from recall_engine.template_renderer import render_template
 
 SKILL_NAME = "recall-engine"
 MARKER_NAME = ".recall-engine-marker.json"
@@ -159,7 +159,7 @@ def _inject_locked(repo_path: Path) -> None:
 
     # The skill is static: it points at the recall-engine MCP server's tools,
     # which read the knowledge repo directly (no in-project link needed).
-    template = files("recall_engine").joinpath("templates/SKILL.md").read_text()
+    template = render_template("SKILL.md.j2")
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(template)
 

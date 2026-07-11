@@ -9,9 +9,9 @@ notes — before replying to any message, points the agent's MCP config at the
 server, launches the agent, and restores everything on exit. It also ships a
 one-way sync between a Google Drive folder and the repo's `src/` directory.
 
-The knowledge base is reached through MCP tools rather than the filesystem, so
-the repo can live outside the project without a sandboxed agent needing access
-to it.
+The knowledge base is reached through an MCP tool and resources rather than the
+filesystem, so the repo can live outside the project without a sandboxed agent
+needing access to it.
 
 ## Install
 
@@ -84,11 +84,12 @@ environment variables are inherited, so
    names (e.g. `claude-company`) are classified via their `--version` output
    or name tokens before launching.
 6. **You work, then restore on exit** — before replying to any message, the
-   skill directs the agent to call `search_knowledge` and cite the note paths
-   it returns, factoring prior processing records into the answer as past
-   experience. Normal exit or Ctrl+C removes the injected skill, symlinks, and
-   MCP config entry, restores any backups, drops this session's claim on the
-   shared server, and returns the agent's exit code.
+   skill directs the agent to call `search_knowledge`, read matching notes via
+   the returned resource URI, and cite the note paths it returns, factoring
+   prior processing records into the answer as past experience. Normal exit or
+   Ctrl+C removes the injected skill, symlinks, and MCP config entry, restores
+   any backups, drops this session's claim on the shared server, and returns the
+   agent's exit code.
 
 You can run several wrap sessions concurrently in the same project directory:
 the first sets up the injected skill and each later one attaches to it, so the
@@ -108,12 +109,15 @@ Skill trigger reliability is higher on sonnet-tier models than on haiku
 ## Shared MCP server
 
 The knowledge base is served over MCP by a single streamable-HTTP server per
-machine, bound to `127.0.0.1` on an ephemeral port. It exposes three read-only
-tools:
+machine, bound to `127.0.0.1` on an ephemeral port. It exposes one read-only
+tool, one read-only resource, and one read-only resource template:
 
-- `search_knowledge(query)` — matching note paths with snippets.
-- `read_note(path)` — the full text of one note.
-- `list_notes()` — available note file names.
+- `search_knowledge(query)` — matching note paths with snippets and a
+  `resource_uri` for each matching note.
+- `recall://notes/index` — exact resource with an index of Markdown notes for
+  the selected repo.
+- `recall://note/{encoded_path}` — resource template for one Markdown note
+  addressed by the `resource_uri` returned from search results.
 
 The first `wrap` spawns the server; later wraps reuse it; the last session to
 exit stops it. A state file (`/tmp/recall-engine-mcp-<uid>.json`, guarded by an
@@ -128,7 +132,7 @@ different repos therefore share a server yet only ever see their own notes.
 
 Two agents need extra setup to reach the server:
 
-- **pi** requires the `pi-mcp-adapter` extension (`pi install pi-mcp-adapter`).
+- **pi** requires the `pi-mcp-adapter` extension (`pi install npm:pi-mcp-adapter`).
   Without it pi cannot reach the server, so `wrap pi` refuses to launch and
   tells you to install the adapter first.
 - **codex** reads the injected `.codex/config.toml` only in trusted projects;
@@ -137,9 +141,10 @@ Two agents need extra setup to reach the server:
   recall-engine server.
 
 Skill injection is what guarantees the agent searches before replying; the MCP
-tools are how it searches. The skill is the reliable trigger because its text
-enters the context directly, whereas an MCP server's `instructions` field is
-injected at the client's discretion.
+tool is how it searches, and MCP resources are the list/read interface. The
+skill is the reliable trigger because its text enters the context directly,
+whereas an MCP server's `instructions` field is injected at the client's
+discretion.
 
 ## Google Drive sync
 
@@ -227,7 +232,8 @@ and `[fail]` when the state file records a server that is not, which
    Verify `/tmp/recall-engine-mcp-<uid>.json` appears with this wrap's pid in
    `owners`, and that the agent's config file gained a `recall-engine` entry.
 2. Send a message covered by a file in `<sample-repo>/src/`; observe the
-   agent calls `search_knowledge` and cites the returned `src/*.md` path.
+   agent calls `search_knowledge`, reads the returned `resource_uri`, and cites
+   the returned `src/*.md` path.
 3. Send an ordinary message not tied to any note; observe the agent still
    searches first and, finding nothing, says so before answering
    from general knowledge. A bare greeting (e.g. "hi") may skip the search.

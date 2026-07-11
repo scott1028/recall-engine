@@ -84,8 +84,8 @@ AGENTS: dict[str, AgentSpec] = {
         # project-root .mcp.json to avoid a collision). lifecycle "keep-alive"
         # makes the adapter connect at startup and auto-reconnect on drop;
         # without it the entry defaults to "lazy" and pi never auto-connects.
-        # directTools registers the server's three tools directly in pi's tool
-        # list instead of hiding them behind the `mcp` proxy the LLM must search.
+        # directTools registers the server's search tool directly in pi's tool
+        # list instead of hiding it behind the `mcp` proxy the LLM must search.
         mcp=McpConfigSpec(
             config_path=".pi/mcp.json",
             fmt="json",

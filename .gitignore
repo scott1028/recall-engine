@@ -6,6 +6,7 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .tmp/
+.testbed/
 
 # Agent runtime skill injection.
 .agents/
