@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import typer
@@ -34,6 +36,7 @@ from recall_engine.mcp_server import run_server
 from recall_engine.mcp_supervisor import (
     SupervisorError,
     ensure_server,
+    log_path,
     release_server,
 )
 from recall_engine.repo import RepoError, ensure_repo
@@ -46,8 +49,39 @@ from recall_engine.skill import (
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="Recall Engine: wrap an agent CLI (claude/codex/pi/gemini/opencode/agy) with a knowledge repo and sync it with Google Drive.",
+    help="""Recall Engine: wrap an agent CLI (claude/codex/pi/gemini/opencode/agy) with a knowledge repo and sync it with Google Drive.
+
+Environment variables:
+
+KNOWLEDGE_REPO_PATH — path to an existing local knowledge repo; optional for a wrap in a directory that already has a running session, where the repo is auto-detected.
+
+KNOWLEDGE_DRIVE_FOLDER — Google Drive folder ID or name (case-insensitive); enables `sync download` / `sync upload` and first-wrap auto-download.""",
 )
+
+
+def _spawn_background_download(repo: Path, drive_folder: str) -> None:
+    """First wrap of a repo: fire-and-forget `sync download` in the background.
+
+    Never waited on, so a slow or failing sync cannot disrupt wrap or the agent;
+    stderr goes to the shared server log instead of interleaving with the TUI.
+    """
+    env = {
+        **os.environ,
+        "KNOWLEDGE_REPO_PATH": str(repo),
+        "KNOWLEDGE_DRIVE_FOLDER": drive_folder,
+    }
+    try:
+        log = open(log_path(), "ab")  # noqa: SIM115 (kept open for the child)
+        subprocess.Popen(
+            [sys.executable, "-m", "recall_engine", "sync", "download"],
+            stdout=subprocess.DEVNULL,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env=env,
+        )
+    except OSError:
+        pass  # best-effort: a spawn failure must not disrupt wrap
 
 
 @app.command(
@@ -112,8 +146,21 @@ def wrap(ctx: typer.Context, agent: str) -> None:
     # when its setup step did not run.
     try:
         inject_skill(repo)
-        server = ensure_server()
+        server = ensure_server(repo)
         inject_mcp_config(family, repo, server.url, server.token)
+        # First wrap to bring this repo online pulls the latest notes from Drive.
+        if server.repo_first:
+            if settings.drive_folder:
+                typer.echo(
+                    f"drive sync: downloading '{settings.drive_folder}' into "
+                    f"{repo / 'src'} in the background"
+                )
+                _spawn_background_download(repo, settings.drive_folder)
+            else:
+                typer.echo(
+                    "drive sync: skipped (set KNOWLEDGE_DRIVE_FOLDER to "
+                    "auto-download notes on first wrap)"
+                )
         typer.echo(f"launching {agent}...")
         # agy only reads the injected .agents/ config when the project dir is in
         # its workspace, so pass `--add-dir <project>` for it.

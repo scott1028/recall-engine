@@ -24,7 +24,7 @@ def stub_mcp_server(monkeypatch):
     /tmp state file. The per-project MCP-config injection still runs for real."""
     monkeypatch.setattr(
         "recall_engine.cli.ensure_server",
-        lambda token=None: ServerInfo(
+        lambda repo=None, token=None: ServerInfo(
             url="http://127.0.0.1:9/mcp", port=9, token="testtok", pid=os.getpid()
         ),
     )
@@ -425,3 +425,107 @@ def test_unwrap_cleans_stale_state_and_reports_empty_project(monkeypatch, tmp_pa
     result = runner.invoke(app, ["unwrap"])
     assert result.exit_code == 0
     assert "nothing to clean" in result.output
+def _stub_repo_first(monkeypatch, repo_first: bool):
+    monkeypatch.setattr(
+        "recall_engine.cli.ensure_server",
+        lambda repo=None, token=None: ServerInfo(
+            url="http://127.0.0.1:9/mcp",
+            port=9,
+            token="testtok",
+            pid=os.getpid(),
+            repo_first=repo_first,
+        ),
+    )
+def test_wrap_first_repo_triggers_background_download(monkeypatch, tmp_path):
+    # First wrap of a repo (repo_first) + a Drive folder -> background sync.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    install_fake_claude(tmp_path, monkeypatch, "exit 0")
+    monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
+    monkeypatch.setenv("KNOWLEDGE_DRIVE_FOLDER", "Shared")
+    monkeypatch.chdir(project)
+    _stub_repo_first(monkeypatch, True)
+    calls = []
+    monkeypatch.setattr(
+        "recall_engine.cli._spawn_background_download",
+        lambda repo, drive_folder: calls.append((repo, drive_folder)),
+    )
+    result = runner.invoke(app, ["wrap", "claude"])
+    assert result.exit_code == 0
+    assert calls == [(repo.resolve(), "Shared")]
+    assert "drive sync: downloading" in result.output
+def test_wrap_non_first_repo_skips_background_download(monkeypatch, tmp_path):
+    # repo_first is False -> no auto-sync even with a Drive folder set.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    install_fake_claude(tmp_path, monkeypatch, "exit 0")
+    monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
+    monkeypatch.setenv("KNOWLEDGE_DRIVE_FOLDER", "Shared")
+    monkeypatch.chdir(project)
+    _stub_repo_first(monkeypatch, False)
+    calls = []
+    monkeypatch.setattr(
+        "recall_engine.cli._spawn_background_download",
+        lambda repo, drive_folder: calls.append((repo, drive_folder)),
+    )
+    result = runner.invoke(app, ["wrap", "claude"])
+    assert result.exit_code == 0
+    assert calls == []
+    assert "drive sync:" not in result.output  # attach -> stay silent
+def test_wrap_first_repo_without_drive_folder_skips_download(monkeypatch, tmp_path):
+    # repo_first is True but no Drive folder configured -> nothing to download.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    install_fake_claude(tmp_path, monkeypatch, "exit 0")
+    monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
+    monkeypatch.delenv("KNOWLEDGE_DRIVE_FOLDER", raising=False)
+    monkeypatch.chdir(project)
+    _stub_repo_first(monkeypatch, True)
+    calls = []
+    monkeypatch.setattr(
+        "recall_engine.cli._spawn_background_download",
+        lambda repo, drive_folder: calls.append((repo, drive_folder)),
+    )
+    result = runner.invoke(app, ["wrap", "claude"])
+    assert result.exit_code == 0
+    assert calls == []
+    assert "drive sync: skipped" in result.output
+def test_spawn_background_download_command_and_env(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+    from recall_engine import cli
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(cli, "log_path", lambda: tmp_path / "mcp.log")
+    recorded = {}
+    def fake_popen(argv, **kwargs):
+        recorded["argv"] = argv
+        recorded["kwargs"] = kwargs
+        return object()
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    cli._spawn_background_download(repo, "Shared")
+    assert recorded["argv"] == [
+        sys.executable, "-m", "recall_engine", "sync", "download",
+    ]
+    env = recorded["kwargs"]["env"]
+    assert env["KNOWLEDGE_REPO_PATH"] == str(repo)
+    assert env["KNOWLEDGE_DRIVE_FOLDER"] == "Shared"
+    assert recorded["kwargs"]["start_new_session"] is True
+    assert recorded["kwargs"]["stdout"] == subprocess.DEVNULL
+    assert recorded["kwargs"]["stdin"] == subprocess.DEVNULL
+def test_spawn_background_download_swallows_errors(monkeypatch, tmp_path):
+    from recall_engine import cli
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(cli, "log_path", lambda: tmp_path / "mcp.log")
+    def boom(*args, **kwargs):
+        raise OSError("cannot spawn")
+    monkeypatch.setattr(cli.subprocess, "Popen", boom)
+    # Must not raise.
+    cli._spawn_background_download(repo, "Shared")

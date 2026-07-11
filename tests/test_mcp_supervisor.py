@@ -154,3 +154,86 @@ def test_server_status_reports_reachable_and_stale_state(tmp_state, monkeypatch)
 def test_wait_healthy_fails_when_process_dies(tmp_state):
     # A never-listening, already-dead pid must not be reported healthy.
     assert sup._wait_healthy(sup._free_port(), dead_pid(), timeout=1.0) is False
+def test_ensure_server_repo_first_then_attach(tmp_state, monkeypatch, tmp_path):
+    procs = []
+    def fake_spawn(port, token):
+        p = _fake_listener_proc(port)
+        procs.append(p)
+        return p.pid
+    monkeypatch.setattr(sup, "_spawn_server", fake_spawn)
+    repo_a = tmp_path / "repo_a"
+    repo_b = tmp_path / "repo_b"
+    try:
+        # First wrap of repo_a -> first.
+        assert sup.ensure_server(repo=repo_a).repo_first is True
+        # Same repo, same live pid -> attach, not first.
+        assert sup.ensure_server(repo=repo_a).repo_first is False
+        # A different repo is independent -> first.
+        assert sup.ensure_server(repo=repo_b).repo_first is True
+        record = sup._read_state()
+        assert record["repo_owners"][str(repo_a)] == [os.getpid()]
+        assert record["repo_owners"][str(repo_b)] == [os.getpid()]
+    finally:
+        for p in procs:
+            p.terminate()
+            p.wait()
+def test_ensure_server_no_repo_is_never_first(tmp_state, monkeypatch):
+    procs = []
+    def fake_spawn(port, token):
+        p = _fake_listener_proc(port)
+        procs.append(p)
+        return p.pid
+    monkeypatch.setattr(sup, "_spawn_server", fake_spawn)
+    try:
+        assert sup.ensure_server().repo_first is False
+        assert "repo_owners" in sup._read_state()
+    finally:
+        for p in procs:
+            p.terminate()
+            p.wait()
+def test_repo_first_resets_after_all_repo_owners_release(tmp_state, monkeypatch, tmp_path):
+    procs = []
+    def fake_spawn(port, token):
+        p = _fake_listener_proc(port)
+        procs.append(p)
+        return p.pid
+    monkeypatch.setattr(sup, "_spawn_server", fake_spawn)
+    repo = tmp_path / "repo"
+    try:
+        assert sup.ensure_server(repo=repo).repo_first is True
+        # Keep the server alive via another machine-wide owner so releasing our
+        # pid does not tear down the whole state file.
+        other = _fake_listener_proc(sup._free_port())
+        procs.append(other)
+        record = sup._read_state()
+        record["owners"] = sorted(set(record["owners"]) | {other.pid})
+        sup.atomic_write_json(sup._state_path(), record)
+        # Our pid leaves -> repo has no live owner anymore.
+        assert sup.release_server(owner_pid=os.getpid()) is True
+        record = sup._read_state()
+        assert str(repo) not in record.get("repo_owners", {})
+        # Next wrap of the same repo is first again.
+        assert sup.ensure_server(repo=repo).repo_first is True
+    finally:
+        for p in procs:
+            p.terminate()
+            p.wait()
+def test_repo_first_when_prior_owner_is_dead(tmp_state, monkeypatch, tmp_path):
+    procs = []
+    def fake_spawn(port, token):
+        p = _fake_listener_proc(port)
+        procs.append(p)
+        return p.pid
+    monkeypatch.setattr(sup, "_spawn_server", fake_spawn)
+    repo = tmp_path / "repo"
+    try:
+        sup.ensure_server()  # bring up a live server
+        record = sup._read_state()
+        record["repo_owners"] = {str(repo): [dead_pid()]}
+        sup.atomic_write_json(sup._state_path(), record)
+        # The recorded owner is dead -> counts as first again.
+        assert sup.ensure_server(repo=repo).repo_first is True
+    finally:
+        for p in procs:
+            p.terminate()
+            p.wait()

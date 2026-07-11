@@ -187,6 +187,17 @@ aborts and asks for the folder ID.
 - Sync is **non-recursive**: only `<repo>/src/*.md` and the top level of the
   Drive folder are considered.
 
+### Auto-sync on first wrap
+
+When `wrap` brings a repo online for the **first time on the machine** (no other
+live wrap session is using that repo) and `KNOWLEDGE_DRIVE_FOLDER` is set, it
+fires a one-time `sync download` in a detached background subprocess so you start
+with the latest notes. It is **best-effort**: the wrap never waits on it and a
+failure (missing credentials, folder not found, …) is ignored — the error is
+written to the shared server log (`/tmp/recall-engine-mcp-<uid>.log`) instead of
+the terminal, so it never disrupts the agent. The repo counts as "first" again
+once all of its wrap sessions have exited.
+
 ## Environment variables
 
 | Variable | Purpose |
