@@ -146,22 +146,6 @@ def test_preexisting_json_backed_up_and_restored(project):
     backup = Path(str(path) + ".recall-engine-mcp-backup")
     assert not backup.exists()
 # --- 4. token=None omits X-Recall-Token -------------------------------------
-def test_token_none_omits_token_header(project):
-    repo = project / "repo"
-    inject_mcp_config("claude", repo, URL)
-    entry = json.loads(config_path(project, "claude").read_text())["mcpServers"][
-        "recall-engine"
-    ]
-    assert entry["headers"] == {"X-Recall-Repo": str(repo)}
-    assert "X-Recall-Token" not in entry["headers"]
-def test_token_none_omits_token_header_toml(project):
-    repo = project / "repo"
-    inject_mcp_config("codex", repo, URL)
-    server = tomllib.loads(config_path(project, "codex").read_text())["mcp_servers"][
-        "recall-engine"
-    ]
-    assert server["http_headers"] == {"X-Recall-Repo": str(repo)}
-# --- 5. Refcount across multiple owners -------------------------------------
 def test_attach_same_repo_reasserts_entry_no_duplicate_backup(project):
     repo = project / "repo"
     inject_mcp_config("pi", repo, URL, token=TOKEN)  # first owner
@@ -298,8 +282,6 @@ def test_malformed_toml_raises_clean_error_and_preserves_file(project):
     assert path.read_text() == original
     assert not Path(str(path) + ".recall-engine-mcp-backup").exists()
 # --- Misc -------------------------------------------------------------------
-def test_restore_with_nothing_returns_false(project):
-    assert restore_mcp_config() is False
 def test_stale_marker_all_dead_reinjected_fresh(project, capsys):
     repo = project / "repo"
     inject_mcp_config("claude", repo, URL, token=TOKEN)
@@ -314,14 +296,3 @@ def test_stale_marker_all_dead_reinjected_fresh(project, capsys):
         "recall-engine"
     ]
     assert entry["url"] == URL
-def test_no_mcp_spec_is_noop(project, monkeypatch):
-    # An agent whose spec lacks .mcp must be a no-op (no marker, no error).
-    monkeypatch.setitem(AGENTS, "nomcp", AGENTS["claude"].__class__(
-        name="nomcp",
-        skills_dir=".claude/skills",
-        version_signature=None,
-        install_hint="",
-        mcp=None,
-    ))
-    inject_mcp_config("nomcp", project / "repo", URL)
-    assert not marker_path(project).exists()

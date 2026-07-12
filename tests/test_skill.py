@@ -42,19 +42,14 @@ def test_inject_creates_skill_marker_symlinks_and_public_content(project, tmp_pa
         "predict useful expansion keywords"
     ) in content
     assert "Split compound phrases into shorter search terms" in content
-    assert "read_note" not in content
-    assert "list_notes" not in content
     assert "recall://note/{encoded_path}" in content
     assert "resource_uri" in content
     assert "{%" not in content
     assert "{{" not in content
-    assert "{knowledge_dir}" not in content
-    assert "{repo_path}" not in content
-    assert ".knowledge" not in content
+    assert str(repo) not in content  # the skill names no repo path
     record = json.loads(marker.read_text())
     assert record["pids"] == [os.getpid()]
     assert record["backup"] is None
-    assert "knowledge" not in record  # no more in-project .knowledge link
     assert record["repo_path"] == str(repo)
     assert record["injected_at"]
     for link in link_paths(project):
@@ -62,9 +57,6 @@ def test_inject_creates_skill_marker_symlinks_and_public_content(project, tmp_pa
         assert not Path(os.readlink(link)).is_absolute()
         assert link.resolve() == skill_dir.resolve()
         assert (link / "SKILL.md").exists()
-    knowledge = project / ".knowledge"
-    assert not knowledge.exists()
-    assert not knowledge.is_symlink()
 def test_inject_skips_agent_dir_that_resolves_to_ssot(project, tmp_path):
     claude_skills = project / ".claude" / "skills"
     claude_skills.parent.mkdir()
@@ -78,34 +70,6 @@ def test_inject_skips_agent_dir_that_resolves_to_ssot(project, tmp_path):
     assert not (project / ".claude" / "skills" / "recall-engine").is_symlink()
     assert (project / ".gemini" / "skills" / "recall-engine").is_symlink()
     assert (project / ".pi" / "skills" / "recall-engine").is_symlink()
-def test_inject_leaves_existing_knowledge_untouched(project, tmp_path):
-    # We no longer manage .knowledge, so a user's own .knowledge is left alone.
-    repo = tmp_path / "repo"
-    (repo / "src").mkdir(parents=True)
-    existing = project / ".knowledge"
-    existing.mkdir()
-    (existing / "user.md").write_text("user knowledge\n")
-    inject_skill(repo)
-    assert existing.is_dir()
-    assert not existing.is_symlink()
-    assert (existing / "user.md").read_text() == "user knowledge\n"
-    assert restore_skill(owner_pid=os.getpid()) is True
-    assert existing.is_dir()
-    assert (existing / "user.md").read_text() == "user knowledge\n"
-def test_restore_cleans_legacy_knowledge_link_from_old_marker(project, tmp_path):
-    # An old-version marker recorded a .knowledge symlink; restore must clean it.
-    repo = tmp_path / "repo"
-    (repo / "src").mkdir(parents=True)
-    inject_skill(repo)
-    _, marker, _ = skill_paths(project)
-    knowledge = project / ".knowledge"
-    os.symlink(repo / "src", knowledge)
-    record = json.loads(marker.read_text())
-    record["knowledge"] = {"path": str(knowledge), "backup": None}
-    marker.write_text(json.dumps(record))
-    assert restore_skill(owner_pid=os.getpid()) is True
-    assert not knowledge.exists()
-    assert not knowledge.is_symlink()
 def test_restore_with_nothing_then_removes_skill_marker_and_symlinks(project, tmp_path):
     assert restore_skill() is False
     inject_skill(tmp_path / "repo")

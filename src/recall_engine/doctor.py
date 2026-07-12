@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 
+from recall_engine import search
 from recall_engine.agents import AGENTS
 from recall_engine.config import ConfigError, resolve_settings
 from recall_engine.drive import DriveError, build_drive_service, execute
@@ -86,6 +86,19 @@ def _check_mcp_server() -> bool:
     return False
 
 
+def _report_ugrep() -> None:
+    """Informational: ugrep only speeds up the knowledge search; the built-in
+    scan covers the same searches without it, so a miss is not a failure."""
+    path = search.ugrep_path()
+    if path is None:
+        print(
+            "[skip] ugrep: not found on PATH; knowledge search falls back to a "
+            f"slower built-in scan ({search.UGREP_INSTALL_HINT})"
+        )
+        return
+    _ok("ugrep", path)
+
+
 def _report_pi_mcp_adapter() -> None:
     """Informational: pi reaches the MCP server only via pi-mcp-adapter."""
     if shutil.which("pi") is None:
@@ -109,9 +122,9 @@ def _report_codex_trust() -> None:
     )
 
 
-def _check_repo_config() -> bool:
+def _check_repo_config(local_knowledge_path: str | None) -> bool:
     try:
-        settings = resolve_settings()
+        settings = resolve_settings(local_knowledge_path=local_knowledge_path)
     except ConfigError as exc:
         _fail("repo config", "not configured", str(exc))
         return False
@@ -138,26 +151,32 @@ def _check_drive_access() -> bool:
     return True
 
 
-def _report_drive_folder() -> None:
+def _report_drive_folder(remote_knowledge_folder: str | None) -> None:
     """Informational only: the folder is needed just for sync."""
-    folder = os.environ.get("KNOWLEDGE_DRIVE_FOLDER")
-    if folder:
-        _ok("drive folder", folder)
+    if remote_knowledge_folder:
+        _ok("drive folder", remote_knowledge_folder)
     else:
-        print("[skip] drive folder: KNOWLEDGE_DRIVE_FOLDER not set (needed only for sync)")
+        print(
+            "[skip] drive folder: --remote-knowledge-folder not passed "
+            "(needed only for sync)"
+        )
 
 
-def run_doctor() -> bool:
+def run_doctor(
+    local_knowledge_path: str | None = None,
+    remote_knowledge_folder: str | None = None,
+) -> bool:
     """Run every check; return True only when all required checks pass."""
     results = [
         _check_git(),
         _check_agents(),
         _check_mcp(),
         _check_mcp_server(),
-        _check_repo_config(),
+        _check_repo_config(local_knowledge_path),
         _check_drive_access(),
     ]
+    _report_ugrep()
     _report_pi_mcp_adapter()
     _report_codex_trust()
-    _report_drive_folder()
+    _report_drive_folder(remote_knowledge_folder)
     return all(results)

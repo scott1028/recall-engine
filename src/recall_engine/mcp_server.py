@@ -15,7 +15,7 @@ from pathlib import Path
 import uvicorn
 from mcp.server.fastmcp import Context, FastMCP
 
-from recall_engine import index
+from recall_engine import search
 from recall_engine.template_renderer import render_template
 
 INSTRUCTIONS = render_template("rules/mcp_server_instructions.md").strip()
@@ -75,11 +75,16 @@ def create_server(token: str | None = None) -> FastMCP:
         return repo
 
     def resolve_note(src: Path, path: str) -> Path:
-        """Resolve a note path and keep access inside <repo>/src."""
+        """Resolve a note path and keep the request inside <repo>/src.
+
+        Lexical, not realpath-based: a symlink under src/ is a note even when it
+        points outside src/, so only '..' escapes and paths outside src/ are
+        rejected — see search.is_note_inside. '..' is rejected outright because
+        a symlinked dir makes the lexical parent differ from the real one.
+        """
         candidate = Path(path)
         note = candidate if candidate.is_absolute() else src / candidate
-        note = note.resolve()
-        if note != src and src not in note.parents:
+        if ".." in note.parts or not search.is_note_inside(src, note):
             raise ValueError(f"path is outside the knowledge repo src/ directory: {path}")
         if not note.is_file():
             raise ValueError(f"note not found: {path}")
@@ -96,49 +101,22 @@ def create_server(token: str | None = None) -> FastMCP:
             "resource_uri": note_resource_uri(src, note),
         }
 
-    def scan_lines(
-        src: Path, note: Path, content: str, needle: str, matches: list[dict]
-    ) -> bool:
-        """Append line matches for one note; return True once MAX_MATCHES is hit."""
-        for lineno, line in enumerate(content.splitlines(), start=1):
-            if needle in line.lower():
-                matches.append(
-                    {
-                        "path": str(note),
-                        "line": lineno,
-                        "snippet": line.strip(),
-                        "resource_uri": note_resource_uri(src, note),
-                    }
-                )
-                if len(matches) >= MAX_MATCHES:
-                    return True
-        return False
-
     @mcp.tool()
     def search_knowledge(query: str, ctx: Context) -> list[dict]:
         """Case-insensitive substring search across <repo>/src/**/*.md.
 
-        Prefers the SQLite index (<repo>/.sqlite3.db) kept live by a watchdog;
-        falls back to a direct filesystem scan when the index is unavailable.
+        Runs ugrep when it is on PATH; falls back to a built-in scan otherwise.
         """
-        repo = resolve_repo(ctx)
-        src = (repo / "src").resolve()
-        needle = query.lower()
-        matches: list[dict] = []
-
-        repo_index = index.ensure_index(repo)
-        if repo_index is not None and repo_index.db_path.exists():
-            for rel, content in repo_index.search(query, MAX_MATCHES):
-                if scan_lines(src, repo / rel, content, needle, matches):
-                    break
-            return matches
-
-        # As-is fallback: no index / build failed.
-        for note in index.iter_note_paths(src):
-            content = note.read_text(encoding="utf-8", errors="replace")
-            if scan_lines(src, note, content, needle, matches):
-                break
-        return matches
+        src = (resolve_repo(ctx) / "src").resolve()
+        return [
+            {
+                "path": str(note),
+                "line": lineno,
+                "snippet": line.strip(),
+                "resource_uri": note_resource_uri(src, note),
+            }
+            for note, lineno, line in search.search_notes(src, query, MAX_MATCHES)
+        ]
 
     # Add list/read tool adapters only if a supported client cannot use MCP resources.
     @mcp.resource(
@@ -154,7 +132,7 @@ def create_server(token: str | None = None) -> FastMCP:
         src = (resolve_repo(ctx) / "src").resolve()
         return [
             note_index_entry(src, note)
-            for note in index.iter_note_paths(src)
+            for note in search.iter_note_paths(src)
         ]
 
     @mcp.resource(
@@ -177,8 +155,4 @@ def run_server(host: str, port: int, token: str | None = None) -> None:
     """Serve the recall-engine MCP server over streamable HTTP (blocking)."""
     mcp = create_server(token)
     app = mcp.streamable_http_app()
-    try:
-        uvicorn.run(app, host=host, port=port, log_level="error")
-    finally:
-        # On exit no one needs this server's indexes; drop their DB files.
-        index.reset_indexes()
+    uvicorn.run(app, host=host, port=port, log_level="error")

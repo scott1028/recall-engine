@@ -34,26 +34,28 @@ provides the `recall-engine` entry point.
 
 ```bash
 # local knowledge repo
-KNOWLEDGE_REPO_PATH=~/workspace/recall recall-engine wrap claude
+recall-engine wrap --local-knowledge-path ~/workspace/recall claude
 
 # other agent CLIs
-KNOWLEDGE_REPO_PATH=~/workspace/recall recall-engine wrap codex
-KNOWLEDGE_REPO_PATH=~/workspace/recall recall-engine wrap pi
-KNOWLEDGE_REPO_PATH=~/workspace/recall recall-engine wrap gemini
-KNOWLEDGE_REPO_PATH=~/workspace/recall recall-engine wrap opencode
-KNOWLEDGE_REPO_PATH=~/workspace/recall recall-engine wrap agy
+recall-engine wrap --local-knowledge-path ~/workspace/recall codex
+recall-engine wrap --local-knowledge-path ~/workspace/recall pi
+recall-engine wrap --local-knowledge-path ~/workspace/recall gemini
+recall-engine wrap --local-knowledge-path ~/workspace/recall opencode
+recall-engine wrap --local-knowledge-path ~/workspace/recall agy
 ```
 
 ## How wrap works
 
-`recall-engine wrap <agent> [args...]` runs a six-step lifecycle.
-Anything after `<agent>` is forwarded verbatim to the agent, and leading
-environment variables are inherited, so
+`recall-engine wrap [options] <agent> [args...]` runs a six-step lifecycle.
+Anything after `<agent>` is forwarded verbatim to the agent — so pass
+recall-engine's own options **before** `<agent>` — and leading environment
+variables are inherited, so
 `AA=1 recall-engine wrap claude foo --bar` behaves like
 `AA=1 claude foo --bar`:
 
-1. **Prepare the repo** — `KNOWLEDGE_REPO_PATH` selects an existing local
-   knowledge repo, and the command fails if the directory is missing.
+1. **Prepare the repo** — `--local-knowledge-path` selects an existing local
+   knowledge repo (its notes live under `<path>/src/`), and the command fails if
+   the directory is missing.
 2. **Inject the skill** — a rendered `SKILL.md` is written to
    `.agents/skills/recall-engine/` (the Agent Skills SSOT) in the
    current project, and `.claude/skills/`, `.gemini/skills/`, `.pi/skills/`,
@@ -85,8 +87,8 @@ environment variables are inherited, so
 You can run several wrap sessions concurrently in the same project directory:
 the first sets up the injected skill and each later one attaches to it, so the
 skill stays in place until the last session exits. A later session may omit
-`KNOWLEDGE_REPO_PATH` — when it is not set, the repo is auto-detected from the
-running session's marker. Sessions started from different project directories
+`--local-knowledge-path` — when it is not passed, the repo is auto-detected from
+the running session's marker. Sessions started from different project directories
 keep independent skill injections — the marker, lock, and injected skill are
 all per-directory, so they never block or attach to each other — but they do
 share one MCP server.
@@ -109,6 +111,16 @@ tool, one read-only resource, and one read-only resource template:
   the selected repo.
 - `recall://note/{encoded_path}` — resource template for one Markdown note
   addressed by the `resource_uri` returned from search results.
+
+`search_knowledge` is a case-insensitive literal substring search over
+`<repo>/src/**/*.md` (hidden dot-files and dot-dirs are skipped; a symlink under
+`src/` is a note wherever it points, so an external file or directory can be
+mounted into the repo — Drive sync never follows one). It runs
+[`ugrep`](https://ugrep.com) when it is on PATH
+(`sudo apt install ugrep` / `brew install ugrep`); without it the search still
+works, on a slower built-in scan, and `wrap` says so at startup. Nothing is
+pre-indexed, so there is no index to keep in sync — a search always reads the
+notes as they are on disk.
 
 The first `wrap` spawns the server; later wraps reuse it; the last session to
 exit stops it. A state file (`/tmp/recall-engine-mcp-<uid>.json`, guarded by an
@@ -160,15 +172,17 @@ quota project for ADC:
 ### Usage
 
 ```bash
-KNOWLEDGE_DRIVE_FOLDER=Shared KNOWLEDGE_REPO_PATH=~/workspace/recall \
-  recall-engine sync download   # Drive folder -> <repo>/src/
+recall-engine sync download \
+  --local-knowledge-path ~/workspace/recall \
+  --remote-knowledge-folder Shared   # Drive folder -> <repo>/src/
 
-KNOWLEDGE_DRIVE_FOLDER=Shared KNOWLEDGE_REPO_PATH=~/workspace/recall \
-  recall-engine sync upload     # <repo>/src/ -> Drive folder
+recall-engine sync upload \
+  --local-knowledge-path ~/workspace/recall \
+  --remote-knowledge-folder Shared   # <repo>/src/ -> Drive folder
 ```
 
-`KNOWLEDGE_DRIVE_FOLDER` accepts either the Drive folder ID or the folder name.
-Name matching is case-insensitive; if several folders share the name, sync
+`--remote-knowledge-folder` accepts either the Drive folder ID or the folder
+name. Name matching is case-insensitive; if several folders share the name, sync
 aborts and asks for the folder ID.
 
 ### Behavior notes
@@ -190,20 +204,23 @@ aborts and asks for the folder ID.
 ### Auto-sync on first wrap
 
 When `wrap` brings a repo online for the **first time on the machine** (no other
-live wrap session is using that repo) and `KNOWLEDGE_DRIVE_FOLDER` is set, it
-fires a one-time `sync download` in a detached background subprocess so you start
+live wrap session is using that repo) and `--remote-knowledge-folder` is passed,
+it fires a one-time `sync download` in a detached background subprocess so you start
 with the latest notes. It is **best-effort**: the wrap never waits on it and a
 failure (missing credentials, folder not found, …) is ignored — the error is
 written to the shared server log (`/tmp/recall-engine-mcp-<uid>.log`) instead of
 the terminal, so it never disrupts the agent. The repo counts as "first" again
 once all of its wrap sessions have exited.
 
-## Environment variables
+## Options
 
-| Variable | Purpose |
+`wrap`, `sync`, and `doctor` all take the same two options. For `wrap`, pass them
+before `<agent>`: everything after `<agent>` goes to the agent CLI verbatim.
+
+| Option | Purpose |
 |---|---|
-| `KNOWLEDGE_REPO_PATH` | Path to an existing local knowledge repo; optional for a later `wrap` in a directory that already has a running session, where the repo is auto-detected |
-| `KNOWLEDGE_DRIVE_FOLDER` | Google Drive folder ID or name (case-insensitive) for `sync download` / `sync upload` |
+| `--local-knowledge-path` | Path to an existing local knowledge repo; its notes live under `<path>/src/`. Optional for a later `wrap` in a directory that already has a running session, where the repo is auto-detected |
+| `--remote-knowledge-folder` | Google Drive folder ID or name (case-insensitive) for `sync download` / `sync upload` and the first-wrap auto-download |
 
 ## Doctor
 
@@ -227,7 +244,8 @@ and `[fail]` when the state file records a server that is not, which
 
 ### wrap
 
-1. In a scratch project, run `KNOWLEDGE_REPO_PATH=<sample-repo> recall-engine wrap <agent>`
+1. In a scratch project, run
+   `recall-engine wrap --local-knowledge-path <sample-repo> <agent>`
    (repeat for each installed agent: claude, codex, pi, gemini, opencode, agy).
    Verify `/tmp/recall-engine-mcp-<uid>.json` appears with this wrap's pid in
    `owners`, and that the agent's config file gained a `recall-engine` entry.

@@ -157,6 +157,44 @@ def test_download_paginates_and_overwrites_existing_file(monkeypatch, tmp_path):
     list_mock = service.files.return_value.list
     assert list_mock.call_count == 2
     assert list_mock.call_args_list[1].kwargs["pageToken"] == "tok"
+def test_download_skips_symlink_before_fetching_it(tmp_path, capsys):
+    # search may serve a note symlinked out of src/, but sync must not write
+    # through the symlink and clobber the external file it points to. The skip
+    # is decided before the fetch, so a Drive error on a file we were going to
+    # skip anyway cannot fail the sync: get_media/export blow up if called.
+    service = make_service(
+        [
+            {
+                "files": [
+                    {
+                        "id": "f1",
+                        "name": "link.md",
+                        "mimeType": "text/markdown",
+                        "modifiedTime": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "id": "f2",
+                        "name": "doc",
+                        "mimeType": "application/vnd.google-apps.document",
+                        "modifiedTime": "2026-01-01T00:00:00Z",
+                    },
+                ]
+            }
+        ]
+    )
+    service.files.return_value.get_media.side_effect = AssertionError("fetched a skipped file")
+    service.files.return_value.export.side_effect = AssertionError("exported a skipped file")
+    outside = tmp_path / "outside.md"
+    outside.write_text("external content\n")
+    dest = tmp_path / "src"
+    dest.mkdir()
+    (dest / "link.md").symlink_to(outside)
+    (dest / "doc.md").symlink_to(outside)
+    assert sync_download(service, "folder1", dest) == []
+    assert outside.read_text() == "external content\n"
+    stderr = capsys.readouterr().err
+    assert "link.md" in stderr
+    assert "doc.md" in stderr
 def test_download_403_insufficient_scope_raises_drive_error(tmp_path):
     service = MagicMock()
     service.files.return_value.list.return_value.execute.side_effect = make_http_error(
@@ -236,6 +274,19 @@ def test_upload_updates_existing_creates_new_and_escapes_name_query(tmp_path):
     assert create_kwargs["media_body"].mimetype() == "text/markdown"
     query = files_mock.list.call_args_list[1].kwargs["q"]
     assert "name = 'it\\'s.md'" in query
+def test_upload_skips_symlink_pointing_outside_src(tmp_path, capsys):
+    # An external note is mounted for reading, not to be pushed to Drive; a
+    # symlink landing inside src/ is ordinary content and still uploads.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "real.md").write_text("real\n")
+    outside = tmp_path / "outside.md"
+    outside.write_text("external\n")
+    (src / "external.md").symlink_to(outside)
+    (src / "local-link.md").symlink_to(src / "real.md")
+    service = make_service([{"files": []}, {"files": []}])
+    assert sync_upload(service, "folder1", src) == ["local-link.md", "real.md"]
+    assert "external.md" in capsys.readouterr().err
 def test_upload_missing_or_empty_src_dir_raises_drive_error(tmp_path):
     with pytest.raises(DriveError, match="Nothing to upload"):
         sync_upload(MagicMock(), "folder1", tmp_path / "missing")
@@ -282,16 +333,14 @@ def test_build_drive_service_falls_back_to_gcloud_user_token(monkeypatch):
     assert build_drive_service() == "service"
     assert built["credentials"].token == "tok123"
 def test_cli_sync_without_drive_folder_exits_2(monkeypatch, tmp_path):
-    monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(tmp_path))
-    monkeypatch.delenv("KNOWLEDGE_DRIVE_FOLDER", raising=False)
-    result = runner.invoke(app, ["sync", "download"])
+    result = runner.invoke(
+        app, ["sync", "download", "--local-knowledge-path", str(tmp_path)]
+    )
     assert result.exit_code == 2
-    assert "KNOWLEDGE_DRIVE_FOLDER" in result.output
+    assert "--remote-knowledge-folder" in result.output
 def test_cli_sync_download_happy_path(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    monkeypatch.setenv("KNOWLEDGE_REPO_PATH", str(repo))
-    monkeypatch.setenv("KNOWLEDGE_DRIVE_FOLDER", "folder123")
     calls = {}
     monkeypatch.setattr("recall_engine.cli.build_drive_service", lambda: "service")
     monkeypatch.setattr(
@@ -301,7 +350,17 @@ def test_cli_sync_download_happy_path(monkeypatch, tmp_path):
         calls["args"] = (service, folder_id, dest)
         return ["a.md", "b.md"]
     monkeypatch.setattr("recall_engine.cli.sync_download", fake_sync_download)
-    result = runner.invoke(app, ["sync", "download"])
+    result = runner.invoke(
+        app,
+        [
+            "sync",
+            "download",
+            "--local-knowledge-path",
+            str(repo),
+            "--remote-knowledge-folder",
+            "folder123",
+        ],
+    )
     assert result.exit_code == 0
     assert calls["args"] == ("service", "id:folder123", repo.resolve() / "src")
     assert "a.md" in result.output

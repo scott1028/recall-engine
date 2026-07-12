@@ -98,7 +98,7 @@ def detect_active_repo() -> Path | None:
     """Knowledge repo of a live wrap session in this dir, or None.
 
     Lets a second wrap in the same project inherit the running session's repo
-    without re-specifying KNOWLEDGE_REPO_PATH. Best-effort read (marker writes
+    without re-specifying --local-knowledge-path. Best-effort read (marker writes
     are atomic); inject_skill re-validates liveness under the lock.
     """
     skill_dir, marker, _ = _paths()
@@ -245,18 +245,6 @@ def _restore_locked(owner_pid: int | None = None, *, force: bool = False) -> boo
         link_backup = Path(entry["backup"]) if entry.get("backup") else None
         if link_backup and (link_backup.exists() or link_backup.is_symlink()):
             link_backup.rename(link)
-
-    kb = record.get("knowledge")
-    if kb:
-        kb_link = Path(kb["path"])
-        if kb_link.is_symlink() or kb_link.exists():
-            if kb_link.is_symlink() or kb_link.is_file():
-                kb_link.unlink()
-            else:
-                shutil.rmtree(kb_link)
-        kb_backup = Path(kb["backup"]) if kb.get("backup") else None
-        if kb_backup and (kb_backup.exists() or kb_backup.is_symlink()):
-            kb_backup.rename(kb_link)
 
     if skill_dir.is_symlink() or skill_dir.exists():
         if skill_dir.is_symlink() or skill_dir.is_file():

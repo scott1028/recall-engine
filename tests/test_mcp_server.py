@@ -15,13 +15,7 @@ import pytest
 import uvicorn
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
-from recall_engine import index
 from recall_engine.mcp_server import create_server
-@pytest.fixture(autouse=True)
-def _reset_indexes():
-    """Stop each test's observer and clear the registry before tmp cleanup."""
-    yield
-    index.reset_indexes()
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -148,20 +142,10 @@ def test_search_knowledge_hit_and_miss(server_port, tmp_path):
     miss = call_tool(server_port, "search_knowledge", {"query": "kubernetes"}, repo=str(repo))
     assert not miss.isError
     assert miss.structuredContent["result"] == []
-def test_search_builds_sqlite_index(server_port, tmp_path):
-    repo = make_repo(tmp_path / "repo", {"guide.md": "indexed keyword here\n"})
-    db_path = index.index_db_path(repo.resolve())
-    assert not db_path.exists()
-    hit = call_tool(server_port, "search_knowledge", {"query": "keyword"}, repo=str(repo))
-    assert not hit.isError
-    assert [m["path"] for m in hit.structuredContent["result"]] == [note_path(repo, "guide.md")]
-    # To-be path: the SQLite index is created (in the temp dir) on first search.
-    assert db_path.exists()
-def test_search_falls_back_to_scan_without_index(server_port, tmp_path, monkeypatch):
-    # With the DB in the temp dir, a read-only repo no longer blocks the build;
-    # force the index unavailable so search must use the direct-scan fallback.
+def test_search_falls_back_to_scan_without_ugrep(server_port, tmp_path, monkeypatch):
+    # ugrep is optional: with it off PATH the tool still answers, via the scan.
     repo = make_repo(tmp_path / "fb", {"n.md": "fallback keyword here\n"})
-    monkeypatch.setattr("recall_engine.index.ensure_index", lambda repo: None)
+    monkeypatch.setattr("recall_engine.search.ugrep_path", lambda: None)
     res = call_tool(server_port, "search_knowledge", {"query": "keyword"}, repo=str(repo))
     assert not res.isError
     assert [m["path"] for m in res.structuredContent["result"]] == [note_path(repo, "n.md")]
@@ -211,6 +195,9 @@ def test_note_resource_rejects_invalid_paths(server_port, tmp_path):
         ("recall://note/not-valid-***", "invalid encoded note path"),
         (f"{note_resource_uri('doc.md')}***", "invalid encoded note path"),
         (note_resource_uri("../secret.md"), "outside"),
+        # Any '..' is rejected: through a symlinked dir the lexical parent is
+        # not the real one, so the containment check cannot see where it lands.
+        (note_resource_uri("linkdir/../secret.md"), "outside"),
     ]
     for uri, expected_message in cases:
         with pytest.raises(Exception) as exc_info:
@@ -282,11 +269,15 @@ def test_token_auth_for_tool_and_resource(token_server_port, tmp_path):
         token="s3cr3t",
     )
     assert note.contents[0].text == "token protected keyword\n"
-def test_note_enumeration_skips_symlinks_outside_src(server_port, tmp_path):
+def test_note_symlinked_outside_src_is_searched_indexed_and_read(server_port, tmp_path):
+    # A symlink under src/ is a note its owner mounted: search, index and read
+    # all serve it. note_path() cannot be used for it — it resolves symlinks,
+    # while the server reports the path the note was reached by.
     repo = make_repo(tmp_path / "repo", {"safe.md": "inside keyword\n"})
     outside = tmp_path / "outside.md"
     outside.write_text("outside keyword\n")
     os.symlink(outside, repo / "src" / "external.md")
+    external_path = str((repo / "src").resolve() / "external.md")
     search = call_tool(
         server_port,
         "search_knowledge",
@@ -294,12 +285,23 @@ def test_note_enumeration_skips_symlinks_outside_src(server_port, tmp_path):
         repo=str(repo),
     )
     assert not search.isError
-    assert search.structuredContent["result"] == []
+    assert [match["path"] for match in search.structuredContent["result"]] == [
+        external_path
+    ]
     index = read_resource(server_port, "recall://notes/index", repo=str(repo))
     assert json.loads(index.contents[0].text) == [
+        {
+            "path": external_path,
+            "relative_path": "external.md",
+            "resource_uri": note_resource_uri("external.md"),
+        },
         {
             "path": note_path(repo, "safe.md"),
             "relative_path": "safe.md",
             "resource_uri": note_resource_uri("safe.md"),
-        }
+        },
     ]
+    note = read_resource(
+        server_port, note_resource_uri("external.md"), repo=str(repo)
+    )
+    assert note.contents[0].text == "outside keyword\n"

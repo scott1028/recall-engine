@@ -29,28 +29,38 @@ without granting a sandboxed agent filesystem access to them.
 - The implemented commands are `wrap`, `unwrap`, `sync`, and `doctor`, plus a
   hidden `mcp-serve` used internally to spawn the shared server.
 - The project uses `uv run pytest` and `uv run ruff check src tests` for checks.
+- The knowledge search shells out to `ugrep` when it is on `PATH`; without it an
+  equivalent built-in Python scan runs. No search index is built or maintained.
 - No JavaScript, TypeScript, webpack, Vite, or Next.js config is present.
 
 ## Feature: Configure a Knowledge Repo
 
 The CLI must resolve one knowledge repo before it can wrap an agent or sync
-Drive files.
+Drive files. It is configured entirely through CLI options — `--local-knowledge-path`
+for the repo (whose notes live under `<path>/src/`) and `--remote-knowledge-folder`
+for the Drive folder — which `wrap`, `sync`, and `doctor` all accept.
+
+Scenario: pass wrap's options before the agent name
+- Given `wrap` forwards everything after AGENT to the agent CLI verbatim
+- When the user configures a wrap session
+- Then the options must be passed before AGENT
+  (`recall-engine wrap --local-knowledge-path <path> claude --resume`)
 
 Scenario: use a local repo
-- Given `KNOWLEDGE_REPO_PATH` points to an existing directory
+- Given `--local-knowledge-path` names an existing directory
 - When the user runs a command that needs the knowledge repo
 - Then the CLI uses that directory as the knowledge repo
 - And downstream behavior receives the resolved absolute path
 
 Scenario: inherit the repo from a live wrap session
 - Given a wrap session is already running in the same project directory
-- And `KNOWLEDGE_REPO_PATH` is not set
+- And `--local-knowledge-path` is not passed
 - When the user starts another `recall-engine wrap <agent>` there
 - Then the CLI reuses the running session's knowledge repo
 - And it attaches to the existing skill injection
 
 Scenario: reject missing repo settings
-- Given `KNOWLEDGE_REPO_PATH` is not set
+- Given `--local-knowledge-path` is not passed
 - And no live wrap session exists in the current directory
 - When the CLI resolves configuration
 - Then the command fails with a configuration error
@@ -91,6 +101,18 @@ Scenario: reject unsupported agents
 - Then the command exits with code `2`
 - And the output lists the supported agents
 
+Scenario: prefer a shell function over a binary of the same name
+- Given the user defines the agent as a shell function (e.g. an alias wrapper)
+- And a binary of the same name is also on `PATH`
+- When the CLI launches the agent
+- Then the shell function wins, because the agent runs through the user's shell
+
+Scenario: refuse an unsafe agent name
+- Given the agent is launched through the user's interactive shell
+- When the agent name contains shell metacharacters (e.g. `x; rm -rf ~`)
+- Then the CLI refuses to classify or launch it
+- And nothing is passed to the shell
+
 Scenario: restore after launch failure
 - Given the skill was injected
 - And the agent cannot be launched
@@ -114,7 +136,13 @@ Scenario: inject the rendered skill at the Agent Skills SSOT
 - And the skill directs the agent to the MCP tools, naming no repo path
 - And it writes `.agents/skills/.recall-engine-marker.json`
 - And the marker records the resolved repo path so a later wrap in the same
-  directory can reuse it without re-specifying the repo env var
+  directory can reuse it without re-specifying `--local-knowledge-path`
+
+Scenario: skip an agent dir that already resolves to the SSOT
+- Given an agent's skills dir is itself a symlink to `.agents/skills/`
+- When the wrapper injects its skill
+- Then it creates no symlink there, since the skill is already reachable
+- And it never creates a symlink that points at itself
 
 Scenario: symlink the skill into the other agents' skills dirs
 - Given the skill was written to `.agents/skills/recall-engine/`
@@ -217,9 +245,10 @@ Scenario: clean leftovers from a pre-SSOT version
 ## Feature: Share One MCP Server Across Sessions
 
 One streamable-HTTP MCP server per machine serves every wrap session and every
-repo. It exposes `search_knowledge(query)`, `read_note(path)`, and
-`list_notes()` as read-only tools, and is started on demand rather than run as a
-user-managed daemon.
+repo. It exposes one read-only tool, `search_knowledge(query)`, plus two
+read-only resources — `recall://notes/index` (the note list) and
+`recall://note/{encoded_path}` (one note's text) — and is started on demand
+rather than run as a user-managed daemon.
 
 Scenario: start the server on the first wrap
 - Given no recall-engine MCP server is running
@@ -228,6 +257,12 @@ Scenario: start the server on the first wrap
 - And it records the pid, port, url, token, and owner pid in
   `/tmp/recall-engine-mcp-<uid>.json`
 - And it waits until the server accepts connections before launching the agent
+
+Scenario: fail loudly when the server cannot start
+- Given the spawned server process dies before it accepts connections
+- When `wrap` waits for it to become healthy
+- Then the wait fails instead of hanging or launching the agent against a dead
+  server
 
 Scenario: reuse the server for a later wrap
 - Given a recall-engine MCP server is already running and reachable
@@ -248,6 +283,16 @@ Scenario: reject an unconfigured client
 - And a call whose `X-Recall-Repo` header names a directory without `src/` is
   rejected the same way
 
+Scenario: refuse to read a note outside the repo
+- Given `recall://note/{encoded_path}` addresses one note by its encoded path
+- When the encoded path is malformed, or decodes to a path that escapes
+  `<repo>/src/` (e.g. `../../etc/passwd`)
+- Then the read fails, so no path the repo does not itself expose is ever read
+- And any `..` is rejected outright, since a symlinked directory makes the
+  lexical parent differ from the real one
+- And a note the repo does expose is still served, including one symlinked out
+  of `src/` — see "agree on what counts as a note"
+
 Scenario: stop the server with the last session
 - Given two sessions own the running server
 - When the first session exits
@@ -266,6 +311,68 @@ Scenario: reach the server from pi
 - Then `wrap` refuses to launch and tells the user to install the adapter first
 - And `doctor` also advises installing it
 
+## Feature: Search the Knowledge Base
+
+`search_knowledge(query)` is a case-insensitive, literal (non-regex) substring
+search over the notes in `<repo>/src/`. `ugrep` performs it when installed; a
+built-in scan performs it otherwise. Both must answer identically — ugrep is an
+accelerator, never a different feature.
+
+Scenario: match notes by substring
+- Given the selected repo has notes under `<repo>/src/`
+- When the agent calls `search_knowledge` with a query
+- Then each matching line is returned with its note path, line number, snippet,
+  and the `resource_uri` of the note it came from
+- And matches are ordered by note path, then by line number
+- And matching is case-insensitive, so `abc` matches `AbC`
+- And the query is a literal string, so `a.b` does not match `axb`
+- And at most 50 matches are returned
+
+Scenario: search with ugrep installed
+- Given `ugrep` is on `PATH`
+- When the user runs `recall-engine wrap <agent>`
+- Then the CLI reports the ugrep binary the search will use
+- And `search_knowledge` answers through ugrep
+
+Scenario: search without ugrep installed
+- Given `ugrep` is not on `PATH`
+- When the user runs `recall-engine wrap <agent>`
+- Then the CLI warns that search falls back to a slower built-in scan and says
+  how to install ugrep
+- And the agent still launches
+- And `search_knowledge` still returns the same matches, through the scan
+
+Scenario: agree on what counts as a note
+- Given `<repo>/src/` contains a hidden note (a dot-file or a note under a
+  dot-directory), a symlink to a note inside `src/`, a symlink to a file outside
+  `src/`, a symlink to a directory outside `src/`, a symlink back to one of its
+  own ancestors, and a note whose bytes are not valid UTF-8
+- When the agent calls `search_knowledge`
+- Then hidden notes are never searched
+- And a symlink under `src/` is a note wherever it points: containment is judged
+  by where the symlink itself sits, not by what it resolves to, so an external
+  file mounted under `src/` is searched
+- And a symlinked directory is descended into, so an external directory of notes
+  can be mounted under `src/`
+- And a symlink back to an ancestor is not followed, so a loop cannot recurse
+  forever
+- And the note that is not valid UTF-8 is still searched, with the undecodable
+  bytes replaced in the snippet
+- And the answer is identical whether or not ugrep is installed
+
+Scenario: list only what search can find
+- Given the same definition of a note governs search and the note list
+- When the agent reads `recall://notes/index`
+- Then it lists exactly the notes `search_knowledge` is able to match
+- And hidden notes appear in neither
+
+Scenario: always search the notes as they are on disk
+- Given a wrap session is running
+- And a note is added, edited, or deleted in `<repo>/src/`
+- When the agent next calls `search_knowledge`
+- Then the results reflect the current files on disk
+- And no index has to be rebuilt, reconciled, or invalidated for that to hold
+
 ## Feature: Use the Knowledge Base During Agent Sessions
 
 The injected skill must guide the agent to consult the Markdown knowledge base
@@ -277,9 +384,9 @@ Scenario: answer with knowledge-base context
 - Given an agent is running through `recall-engine wrap <agent>`
 - And the user sends any message
 - When the agent prepares the reply
-- Then the skill instructs the agent to call `search_knowledge` (and
-  `read_note` / `list_notes` as needed) for existing processing records, notes,
-  or prior handling of similar problems
+- Then the skill instructs the agent to call `search_knowledge` (and to read
+  `recall://notes/index` / `recall://note/{encoded_path}` as needed) for existing
+  processing records, notes, or prior handling of similar problems
 - And any prior experience found should be factored into the reply and cite the
   note path returned by the tools
 
@@ -306,12 +413,24 @@ Scenario: avoid unintended edits
 `sync download` must copy supported Drive files into `<repo>/src/`.
 
 Scenario: download Markdown files
-- Given `KNOWLEDGE_DRIVE_FOLDER` resolves to a Drive folder
+- Given `--remote-knowledge-folder` resolves to a Drive folder
 - And the folder contains plain `.md` files
 - When the user runs `recall-engine sync download`
 - Then the CLI writes those files into `<repo>/src/`
 - And local files with the same name are overwritten
+- And a local file that is a symlink is skipped with a warning: search may serve
+  a note mounted from outside `src/`, but sync must never write through the
+  symlink and overwrite the file it points to
+- And the skip is decided before Drive is asked for the file's content, so a
+  download or export error on a file that would be skipped anyway cannot fail
+  the sync
 - And unsupported file types are skipped
+
+Scenario: list every file in a large folder
+- Given the Drive folder holds more files than one API page returns
+- When the user runs `sync download`
+- Then the CLI follows the page tokens until every file is listed
+- And no file is missed because it fell on a later page
 
 Scenario: export a native Google Doc
 - Given the Drive folder contains a native Google Doc
@@ -327,6 +446,31 @@ Scenario: handle duplicate target names
 - Then the file with the newest `modifiedTime` wins
 - And the CLI prints a warning
 
+## Feature: Auto-download Notes on a Repo's First Wrap
+
+The first wrap that brings a knowledge repo online pulls the latest notes from
+Drive, so an agent never starts against stale notes.
+
+Scenario: download in the background when a repo comes online
+- Given `--remote-knowledge-folder` is passed
+- And no live wrap session already owns that knowledge repo
+- When the user runs `recall-engine wrap <agent>`
+- Then the CLI starts `sync download` into `<repo>/src/` in the background
+- And it reports that the download is running
+- And a slow or failing download never delays or disrupts the agent launch
+
+Scenario: do not re-download for a later wrap of the same repo
+- Given a live wrap session already owns the knowledge repo
+- When another wrap session starts against that same repo
+- Then no background download is started
+
+Scenario: report a skipped auto-download
+- Given `--remote-knowledge-folder` is not passed
+- When a repo first comes online through `wrap`
+- Then the CLI reports that the Drive sync was skipped
+- And it tells the user to pass `--remote-knowledge-folder` to auto-download on
+  the first wrap
+
 ## Feature: Sync from the Knowledge Repo to Google Drive
 
 `sync upload` must copy top-level Markdown files from `<repo>/src/` to Drive.
@@ -337,6 +481,8 @@ Scenario: create or update Drive Markdown files
 - Then the CLI uploads those files to the configured Drive folder
 - And existing Drive files with the same name are updated
 - And missing Drive files are created
+- And a symlink pointing outside `src/` is skipped with a warning: an external
+  note is mounted for reading, not to be pushed to Drive
 - And uploads remain plain Markdown files, not native Google Docs
 
 Scenario: reject an empty upload source
@@ -346,15 +492,15 @@ Scenario: reject an empty upload source
 
 ## Feature: Resolve the Google Drive Folder
 
-`KNOWLEDGE_DRIVE_FOLDER` may be either a folder ID or a folder name.
+`--remote-knowledge-folder` may be either a folder ID or a folder name.
 
 Scenario: use a folder ID
-- Given `KNOWLEDGE_DRIVE_FOLDER` is a Drive folder ID
+- Given `--remote-knowledge-folder` is a Drive folder ID
 - When sync resolves the folder
 - Then the CLI uses that ID directly
 
 Scenario: use a unique folder name
-- Given `KNOWLEDGE_DRIVE_FOLDER` is a folder name
+- Given `--remote-knowledge-folder` is a folder name
 - And exactly one matching folder exists
 - When sync resolves the folder
 - Then the CLI uses that folder's ID
@@ -364,6 +510,11 @@ Scenario: reject an ambiguous folder name
 - When sync resolves the folder
 - Then the command fails
 - And the output asks the user to set the folder ID instead
+
+Scenario: escape names in Drive queries
+- Given a folder or file name contains a single quote
+- When sync builds the Drive `q=` query for it
+- Then the quote is escaped, so the name cannot alter the query
 
 ## Feature: Authenticate to Google Drive
 
@@ -423,6 +574,13 @@ Scenario: a required check fails
 - And the output includes a concrete fix instruction
 - And the command exits with code `1`
 
+Scenario: report the search backend
+- Given the user runs `recall-engine doctor`
+- When the ugrep check runs
+- Then it prints `[ok]` with the binary path when ugrep is installed
+- And it prints `[skip]` naming the built-in-scan fallback when it is not
+- And that skip does not make doctor fail, because ugrep is optional
+
 Scenario: report a reachable MCP server
 - Given a wrap session has started the shared MCP server
 - When the user runs `doctor`
@@ -442,7 +600,7 @@ Scenario: report a stale MCP server record
 - And the command exits with code `1`
 
 Scenario: Drive folder is not configured
-- Given `KNOWLEDGE_DRIVE_FOLDER` is unset
+- Given `--remote-knowledge-folder` is not passed
 - When the user runs `doctor`
 - Then the Drive folder check prints `[skip]`
 - And that skip does not make doctor fail
@@ -467,7 +625,10 @@ Automated:
 - `uv run ruff check src tests`
 
 Manual:
-- `recall-engine --help` lists `wrap`, `unwrap`, `sync`, and `doctor`
+- `recall-engine --help` lists `wrap`, `unwrap`, `sync`, and `doctor`, and
+  documents the ugrep search backend and its fallback
+- `recall-engine doctor` reports ugrep as `[ok]` when installed and `[skip]`
+  (without failing) when it is not
 - A wrapped agent session reads and cites a relevant file from `<repo>/src/`
 - Drive download writes plain `.md` files and exported Google Docs into
   `<repo>/src/`

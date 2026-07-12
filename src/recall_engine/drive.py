@@ -89,7 +89,7 @@ def escape_query(value: str) -> str:
 
 
 def resolve_folder_id(service: Any, folder: str) -> str:
-    """Resolve KNOWLEDGE_DRIVE_FOLDER to a folder ID; accepts an ID or a name.
+    """Resolve --remote-knowledge-folder to a folder ID; accepts an ID or a name.
 
     The value is first tried as a folder ID (backward compatible); on a 404 it
     is looked up as a folder name, case-insensitively. Ambiguous names raise.
@@ -123,7 +123,7 @@ def resolve_folder_id(service: Any, folder: str) -> str:
         candidates = ", ".join(f"{f['name']} ({f['id']})" for f in matches)
         raise DriveError(
             f"Multiple Drive folders named '{folder}': {candidates}. "
-            "Set KNOWLEDGE_DRIVE_FOLDER to the folder ID instead."
+            "Pass --remote-knowledge-folder with the folder ID instead."
         )
     return matches[0]["id"]
 
@@ -134,8 +134,9 @@ def sync_download(service: Any, folder_id: str, dest: Path) -> list[str]:
     Plain .md files are downloaded as-is; native Google Docs are exported as
     plain text to '<name>.md' (the Markdown export escapes literal Markdown
     in the doc, e.g. '#' becomes '\\#'). Other file types are skipped. Local
-    files are overwritten by name; duplicate names in the folder resolve to
-    the copy with the latest modifiedTime (with a warning).
+    files are overwritten by name, except a symlink, which is skipped; duplicate
+    names in the folder resolve to the copy with the latest modifiedTime (with a
+    warning).
     """
     files: list[dict[str, str]] = []
     page_token: str | None = None
@@ -177,6 +178,17 @@ def sync_download(service: Any, folder_id: str, dest: Path) -> list[str]:
     dest.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
     for target, file in selected.items():
+        destination = dest / target
+        # Sync does not follow symlinks: writing through one would overwrite a
+        # file outside src/ that the repo only mounted for reading. Decided
+        # before the fetch, so a skipped file never depends on Drive answering.
+        if destination.is_symlink():
+            print(
+                f"warning: skipping '{target}': it is a symlink; "
+                "refusing to overwrite the file it points to",
+                file=sys.stderr,
+            )
+            continue
         if file.get("mimeType") == GOOGLE_DOC_MIME:
             content = execute(
                 service.files().export(fileId=file["id"], mimeType="text/plain")
@@ -195,7 +207,7 @@ def sync_download(service: Any, folder_id: str, dest: Path) -> list[str]:
             except HttpError as exc:
                 raise as_drive_error(exc) from exc
             content = buffer.getvalue()
-        (dest / target).write_bytes(content)
+        destination.write_bytes(content)
         written.append(target)
     return written
 
@@ -205,7 +217,9 @@ def sync_upload(service: Any, folder_id: str, src: Path) -> list[str]:
 
     Files are matched by name: an existing Drive file is updated in place,
     otherwise a new plain-Markdown file is created (never converted to a
-    native Google Doc). Returns the uploaded filenames.
+    native Google Doc). A symlink pointing outside src/ is skipped: search may
+    serve such a note, but sync must not push external content to Drive.
+    Returns the uploaded filenames.
     """
     if not src.is_dir():
         raise DriveError(f"Source directory not found: {src}. Nothing to upload.")
@@ -215,6 +229,12 @@ def sync_upload(service: Any, folder_id: str, src: Path) -> list[str]:
 
     uploaded: list[str] = []
     for path in md_files:
+        if path.is_symlink() and src not in path.resolve().parents:
+            print(
+                f"warning: skipping '{path.name}': symlink points outside src/",
+                file=sys.stderr,
+            )
+            continue
         escaped = escape_query(path.name)
         response = execute(
             service.files().list(
