@@ -157,6 +157,40 @@ def test_download_paginates_and_overwrites_existing_file(monkeypatch, tmp_path):
     list_mock = service.files.return_value.list
     assert list_mock.call_count == 2
     assert list_mock.call_args_list[1].kwargs["pageToken"] == "tok"
+def test_download_logs_export_and_download_actions(monkeypatch, tmp_path):
+    service = make_service(
+        [
+            {
+                "files": [
+                    {
+                        "id": "f1",
+                        "name": "note.md",
+                        "mimeType": "text/markdown",
+                        "modifiedTime": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "id": "d1",
+                        "name": "design notes",
+                        "mimeType": drive.GOOGLE_DOC_MIME,
+                        "modifiedTime": "2026-01-01T00:00:00Z",
+                    },
+                ]
+            }
+        ]
+    )
+    service.files.return_value.get_media.side_effect = (
+        lambda fileId: SimpleNamespace(file_id=fileId)
+    )
+    service.files.return_value.export.return_value.execute.return_value = b"# doc\n"
+    install_fake_downloader(monkeypatch, {"f1": b"# note\n"})
+    events: list[str] = []
+    dest = tmp_path / "src"
+    written = sync_download(service, "folder1", dest, log=events.append)
+    assert written == ["note.md", "design notes.md"]
+    assert events == [
+        "drive sync: download note.md",
+        "drive sync: export design notes.md",
+    ]
 def test_download_skips_symlink_before_fetching_it(tmp_path, capsys):
     # search may serve a note symlinked out of src/, but sync must not write
     # through the symlink and clobber the external file it points to. The skip
@@ -219,15 +253,21 @@ def test_resolve_folder_id_accepts_folder_id():
     }
     assert resolve_folder_id(service, "folder1") == "folder1"
     service.files.return_value.list.assert_not_called()
-def test_resolve_folder_id_matches_name_case_insensitively():
+def test_resolve_folder_id_matches_name_case_sensitively():
     service = make_folder_lookup_service(
         [{"files": [{"id": "id1", "name": "Shared"}, {"id": "id2", "name": "shared-notes"}]}]
     )
-    assert resolve_folder_id(service, "shared") == "id1"
+    assert resolve_folder_id(service, "Shared") == "id1"
     query = service.files.return_value.list.call_args.kwargs["q"]
     assert f"mimeType = '{FOLDER_MIME}'" in query
-    assert "name contains 'shared'" in query
+    assert "name contains 'Shared'" in query
     assert "trashed = false" in query
+def test_resolve_folder_id_rejects_wrong_case_name():
+    service = make_folder_lookup_service(
+        [{"files": [{"id": "id1", "name": "Shared"}, {"id": "id2", "name": "shared-notes"}]}]
+    )
+    with pytest.raises(DriveError, match="Drive folder not found: 'shared'"):
+        resolve_folder_id(service, "shared")
 def test_resolve_folder_id_escapes_single_quote_in_name():
     service = make_folder_lookup_service([{"files": [{"id": "id1", "name": "it's"}]}])
     assert resolve_folder_id(service, "it's") == "id1"
@@ -239,13 +279,13 @@ def test_resolve_folder_id_not_found_raises():
         resolve_folder_id(service, "missing")
 def test_resolve_folder_id_ambiguous_name_raises_with_candidates():
     service = make_folder_lookup_service(
-        [{"files": [{"id": "id1", "name": "Shared"}, {"id": "id2", "name": "shared"}]}]
+        [{"files": [{"id": "id1", "name": "shared"}, {"id": "id2", "name": "shared"}]}]
     )
     with pytest.raises(DriveError) as excinfo:
         resolve_folder_id(service, "shared")
     message = str(excinfo.value)
     assert "Multiple Drive folders named 'shared'" in message
-    assert "Shared (id1)" in message
+    assert "shared (id1)" in message
     assert "shared (id2)" in message
     assert "folder ID" in message
 def test_resolve_folder_id_non_404_get_error_propagates():
@@ -285,9 +325,9 @@ def test_upload_updates_existing_creates_new_and_escapes_name_query(tmp_path):
     assert "name = 'it\\'s.md'" in query
     assert (
         files_mock.list.call_args_list[0].kwargs["fields"]
-        == "files(id, name, mimeType)"
+        == "files(id, name)"
     )
-def test_upload_does_not_update_same_name_google_doc(tmp_path):
+def test_upload_updates_same_name_google_doc_to_fix_mime(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     (src / "note.md").write_text("# note\n")
@@ -306,11 +346,32 @@ def test_upload_does_not_update_same_name_google_doc(tmp_path):
     )
     assert sync_upload(service, "folder1", src) == ["note.md"]
     files_mock = service.files.return_value
-    files_mock.update.assert_not_called()
-    files_mock.create.assert_called_once()
-    create_kwargs = files_mock.create.call_args.kwargs
-    assert create_kwargs["body"] == {"name": "note.md", "parents": ["folder1"]}
-    assert create_kwargs["media_body"].mimetype() == "text/markdown"
+    files_mock.update.assert_called_once()
+    assert files_mock.update.call_args.kwargs["fileId"] == "doc1"
+    assert files_mock.update.call_args.kwargs["media_body"].mimetype() == "text/markdown"
+    files_mock.create.assert_not_called()
+def test_upload_logs_update_and_create_actions(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "existing.md").write_text("existing\n")
+    (src / "new.md").write_text("new\n")
+    service = make_service(
+        [
+            {
+                "files": [
+                    {"id": "e1", "name": "existing.md", "mimeType": "text/markdown"}
+                ]
+            },
+            {"files": []},
+        ]
+    )
+    events: list[str] = []
+    uploaded = sync_upload(service, "folder1", src, log=events.append)
+    assert uploaded == ["existing.md", "new.md"]
+    assert events == [
+        "drive sync: update existing.md",
+        "drive sync: create new.md",
+    ]
 def test_upload_skips_symlink_pointing_outside_src(tmp_path, capsys):
     # An external note is mounted for reading, not to be pushed to Drive; a
     # symlink landing inside src/ is ordinary content and still uploads.
@@ -383,8 +444,10 @@ def test_cli_sync_download_happy_path(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "recall_engine.cli.resolve_folder_id", lambda service, folder: f"id:{folder}"
     )
-    def fake_sync_download(service, folder_id, dest):
-        calls["args"] = (service, folder_id, dest)
+    def fake_sync_download(service, folder_id, dest, log=None):
+        calls["args"] = (service, folder_id, dest, log)
+        if log is not None:
+            log("drive sync: download a.md")
         return ["a.md", "b.md"]
     monkeypatch.setattr("recall_engine.cli.sync_download", fake_sync_download)
     result = runner.invoke(
@@ -399,6 +462,45 @@ def test_cli_sync_download_happy_path(monkeypatch, tmp_path):
         ],
     )
     assert result.exit_code == 0
-    assert calls["args"] == ("service", "id:folder123", repo.resolve() / "src")
+    assert calls["args"][:3] == ("service", "id:folder123", repo.resolve() / "src")
+    assert calls["args"][3] is not None
+    assert "drive sync: authenticating" in result.output
+    assert "drive sync: resolving folder folder123" in result.output
+    assert "drive sync: starting download" in result.output
+    assert "drive sync: download a.md" in result.output
     assert "a.md" in result.output
     assert "synced 2 file(s) (download)" in result.output
+def test_cli_sync_upload_happy_path(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    calls = {}
+    monkeypatch.setattr("recall_engine.cli.build_drive_service", lambda: "service")
+    monkeypatch.setattr(
+        "recall_engine.cli.resolve_folder_id", lambda service, folder: f"id:{folder}"
+    )
+    def fake_sync_upload(service, folder_id, src, log=None):
+        calls["args"] = (service, folder_id, src, log)
+        if log is not None:
+            log("drive sync: create note.md")
+        return ["note.md"]
+    monkeypatch.setattr("recall_engine.cli.sync_upload", fake_sync_upload)
+    result = runner.invoke(
+        app,
+        [
+            "sync",
+            "upload",
+            "--local-knowledge-path",
+            str(repo),
+            "--remote-knowledge-folder",
+            "folder123",
+        ],
+    )
+    assert result.exit_code == 0
+    assert calls["args"][:3] == ("service", "id:folder123", repo.resolve() / "src")
+    assert calls["args"][3] is not None
+    assert "drive sync: authenticating" in result.output
+    assert "drive sync: resolving folder folder123" in result.output
+    assert "drive sync: starting upload" in result.output
+    assert "drive sync: create note.md" in result.output
+    assert "note.md" in result.output
+    assert "synced 1 file(s) (upload)" in result.output

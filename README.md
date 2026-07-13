@@ -182,8 +182,8 @@ recall-engine sync upload \
 ```
 
 `--remote-knowledge-folder` accepts either the Drive folder ID or the folder
-name. Name matching is case-insensitive; if several folders share the name, sync
-aborts and asks for the folder ID.
+name. Name matching is case-sensitive; if several folders share the exact name,
+sync aborts and asks for the folder ID.
 
 ### Behavior notes
 
@@ -220,7 +220,7 @@ before `<agent>`: everything after `<agent>` goes to the agent CLI verbatim.
 | Option | Purpose |
 |---|---|
 | `--local-knowledge-path` | Path to an existing local knowledge repo; its notes live under `<path>/src/`. Optional for a later `wrap` in a directory that already has a running session, where the repo is auto-detected |
-| `--remote-knowledge-folder` | Google Drive folder ID or name (case-insensitive) for `sync download` / `sync upload` and the first-wrap auto-download |
+| `--remote-knowledge-folder` | Google Drive folder ID or name (case-sensitive) for `sync download` / `sync upload` and the first-wrap auto-download |
 
 ## Doctor
 

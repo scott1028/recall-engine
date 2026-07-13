@@ -6,6 +6,7 @@ import io
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +93,7 @@ def resolve_folder_id(service: Any, folder: str) -> str:
     """Resolve --remote-knowledge-folder to a folder ID; accepts an ID or a name.
 
     The value is first tried as a folder ID (backward compatible); on a 404 it
-    is looked up as a folder name, case-insensitively. Ambiguous names raise.
+    is looked up as a case-sensitive folder name. Ambiguous names raise.
     """
     try:
         file = service.files().get(fileId=folder, fields="id, mimeType").execute()
@@ -102,7 +103,7 @@ def resolve_folder_id(service: Any, folder: str) -> str:
         if exc.resp.status != 404:
             raise as_drive_error(exc) from exc
 
-    # 'contains' matches case-insensitively; exact-match client-side.
+    # 'contains' broadens the Drive query; exact case-sensitive match is client-side.
     response = execute(
         service.files().list(
             q=(
@@ -112,9 +113,7 @@ def resolve_folder_id(service: Any, folder: str) -> str:
             fields="files(id, name)",
         )
     )
-    matches = [
-        f for f in response.get("files", []) if f["name"].lower() == folder.lower()
-    ]
+    matches = [f for f in response.get("files", []) if f["name"] == folder]
     if not matches:
         raise DriveError(
             f"Drive folder not found: '{folder}' (checked as both ID and name)"
@@ -128,7 +127,17 @@ def resolve_folder_id(service: Any, folder: str) -> str:
     return matches[0]["id"]
 
 
-def sync_download(service: Any, folder_id: str, dest: Path) -> list[str]:
+def _log_sync(log: Callable[[str], None] | None, message: str) -> None:
+    if log is not None:
+        log(f"drive sync: {message}")
+
+
+def sync_download(
+    service: Any,
+    folder_id: str,
+    dest: Path,
+    log: Callable[[str], None] | None = None,
+) -> list[str]:
     """Download the Drive folder's .md files into dest; return written filenames.
 
     Plain .md files are downloaded as-is; native Google Docs are exported as
@@ -190,12 +199,14 @@ def sync_download(service: Any, folder_id: str, dest: Path) -> list[str]:
             )
             continue
         if file.get("mimeType") == GOOGLE_DOC_MIME:
+            _log_sync(log, f"export {target}")
             content = execute(
                 service.files().export(fileId=file["id"], mimeType="text/plain")
             )
             # The plain-text export starts with a BOM and uses CRLF line endings.
             content = content.removeprefix(b"\xef\xbb\xbf").replace(b"\r\n", b"\n")
         else:
+            _log_sync(log, f"download {target}")
             buffer = io.BytesIO()
             downloader = MediaIoBaseDownload(
                 buffer, service.files().get_media(fileId=file["id"])
@@ -212,13 +223,18 @@ def sync_download(service: Any, folder_id: str, dest: Path) -> list[str]:
     return written
 
 
-def sync_upload(service: Any, folder_id: str, src: Path) -> list[str]:
+def sync_upload(
+    service: Any,
+    folder_id: str,
+    src: Path,
+    log: Callable[[str], None] | None = None,
+) -> list[str]:
     """Upload every .md file in src (non-recursive) to the Drive folder.
 
-    Files are matched by name: an existing non-Google-Apps Drive file is updated
-    in place, otherwise a new plain-Markdown file is created (never converted
-    to a native Google Doc). A symlink pointing outside src/ is skipped: search
-    may serve such a note, but sync must not push external content to Drive.
+    Files are matched by name: an existing Drive file is updated in place,
+    otherwise a new plain-Markdown file is created (never converted to a
+    native Google Doc). A symlink pointing outside src/ is skipped: search may
+    serve such a note, but sync must not push external content to Drive.
     Returns the uploaded filenames.
     """
     if not src.is_dir():
@@ -242,18 +258,16 @@ def sync_upload(service: Any, folder_id: str, src: Path) -> list[str]:
                     f"name = '{escaped}' and '{folder_id}' in parents "
                     "and trashed = false"
                 ),
-                fields="files(id, name, mimeType)",
+                fields="files(id, name)",
             )
         )
-        matches = [
-            file
-            for file in response.get("files", [])
-            if not file.get("mimeType", "").startswith(GOOGLE_APPS_PREFIX)
-        ]
+        matches = response.get("files", [])
         media = MediaIoBaseUpload(io.BytesIO(path.read_bytes()), mimetype="text/markdown")
         if matches:
+            _log_sync(log, f"update {path.name}")
             execute(service.files().update(fileId=matches[0]["id"], media_body=media))
         else:
+            _log_sync(log, f"create {path.name}")
             execute(
                 service.files().create(
                     body={"name": path.name, "parents": [folder_id]},

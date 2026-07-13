@@ -54,7 +54,7 @@ LOCAL_KNOWLEDGE_PATH_HELP = (
     "the repo is auto-detected."
 )
 REMOTE_KNOWLEDGE_FOLDER_HELP = (
-    "Google Drive folder ID or name (case-insensitive); enables `sync download` / "
+    "Google Drive folder ID or name (case-sensitive); enables `sync download` / "
     "`sync upload` and the first-wrap auto-download."
 )
 
@@ -327,12 +327,15 @@ def sync(
         raise typer.Exit(1) from exc
     src_dir = repo / "src"
     try:
+        typer.echo("drive sync: authenticating")
         service = build_drive_service()
+        typer.echo(f"drive sync: resolving folder {settings.drive_folder}")
         folder_id = resolve_folder_id(service, settings.drive_folder)
+        typer.echo(f"drive sync: starting {mode}")
         if mode == "download":
-            names = sync_download(service, folder_id, src_dir)
+            names = sync_download(service, folder_id, src_dir, log=typer.echo)
         else:
-            names = sync_upload(service, folder_id, src_dir)
+            names = sync_upload(service, folder_id, src_dir, log=typer.echo)
     except DriveError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
