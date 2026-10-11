@@ -2,8 +2,11 @@
 it is installed, and the built-in scan (with ugrep forced off PATH). They must
 return identical results, so the fallback stays a drop-in for ugrep."""
 from pathlib import Path
+
 import pytest
+
 from recall_engine import search
+
 HAS_UGREP = search.ugrep_path() is not None
 @pytest.fixture(params=["ugrep", "scan"])
 def backend(request, monkeypatch):

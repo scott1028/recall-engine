@@ -153,15 +153,17 @@ def _write_json_entry(
         **({"type": spec.type_value} if spec.type_value else {}),
         **spec.extra_fields,
     }
-    servers = existing.get(spec.servers_key)
-    if servers is None:
-        servers = {}
-        existing[spec.servers_key] = servers
-    elif not isinstance(servers, dict):
-        raise McpConfigError(
-            f"{config_path}: '{spec.servers_key}' is not a JSON object; "
-            "recall-engine will not modify it."
-        )
+    servers = existing
+    for key in spec.servers_path:
+        child = servers.get(key)
+        if child is None:
+            child = servers[key] = {}
+        elif not isinstance(child, dict):
+            raise McpConfigError(
+                f"{config_path}: '{'.'.join(spec.servers_path)}' is not a JSON "
+                "object; recall-engine will not modify it."
+            )
+        servers = child
     servers[MCP_SERVER_NAME] = entry
     config_path.write_text(json.dumps(existing, indent=2))
 
@@ -182,9 +184,11 @@ def _write_toml_entry(
             ) from exc
     else:
         doc = tomlkit.document()
-    if spec.servers_key not in doc:
-        doc[spec.servers_key] = tomlkit.table()
-    servers = doc[spec.servers_key]
+    servers = doc
+    for key in spec.servers_path:
+        if key not in servers:
+            servers[key] = tomlkit.table()
+        servers = servers[key]
     server = tomlkit.table()
     server[spec.url_field] = url
     header_table = tomlkit.table()
@@ -242,7 +246,7 @@ def _inject_locked(
                 )
             else:
                 # Already registered: re-assert the entry so a recall-engine
-                # upgrade patches new/changed fields (e.g. pi's lifecycle) into
+                # upgrade patches new/changed fields (e.g. pi's exposure) into
                 # a config an older version injected. The first-touch backup
                 # still holds the user's original, so restore stays correct.
                 _write_entry(spec, repo_path, url, token)

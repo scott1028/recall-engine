@@ -1,11 +1,14 @@
 import json
 import os
 from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
+
 from recall_engine import search
 from recall_engine.cli import app
 from recall_engine.mcp_supervisor import ServerInfo
+
 runner = CliRunner()
 @pytest.fixture(autouse=True)
 def stub_mcp_server(monkeypatch):
@@ -73,27 +76,8 @@ def test_wrap_detects_claude_wrapper(monkeypatch, tmp_path):
     result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "claude-company"])
     assert result.exit_code == 7
     assert "launching claude-company..." in result.output
-def test_wrap_pi_blocks_without_adapter(monkeypatch, tmp_path):
-    # pi runs but lacks pi-mcp-adapter -> wrap refuses before any injection.
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    project = tmp_path / "project"
-    project.mkdir()
-    install_fake_claude(
-        tmp_path,
-        monkeypatch,
-        'if [ "$1" = "list" ]; then echo "  npm:pi-web-access"; exit 0; fi\nexit 0',
-        name="pi",
-    )
-    monkeypatch.chdir(project)
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "pi"])
-    assert result.exit_code == 2
-    assert "pi install npm:pi-mcp-adapter" in result.output
-    # Blocked before setup: nothing injected, nothing launched.
-    assert "launching pi..." not in result.output
-    assert not (project / ".pi" / "mcp.json").exists()
-def test_wrap_pi_launches_with_adapter(monkeypatch, tmp_path):
-    # pi reports the adapter -> wrap proceeds through the full lifecycle.
+def test_wrap_pi_launches_without_adapter(monkeypatch, tmp_path):
+    # pi >= 0.99 has built-in MCP, so wrap no longer requires pi-mcp-adapter.
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     project = tmp_path / "project"
@@ -101,7 +85,7 @@ def test_wrap_pi_launches_with_adapter(monkeypatch, tmp_path):
     install_fake_claude(
         tmp_path,
         monkeypatch,
-        'if [ "$1" = "list" ]; then echo "  npm:pi-mcp-adapter"; exit 0; fi\nexit 0',
+        'if [ "$1" = "list" ]; then echo "  npm:pi-web-access"; exit 0; fi\nexit 0',
         name="pi",
     )
     monkeypatch.chdir(project)
@@ -413,6 +397,7 @@ def test_spawn_background_download_command(monkeypatch, tmp_path):
     # The child gets its config on the command line, not through the environment.
     import subprocess
     import sys
+
     from recall_engine import cli
     repo = tmp_path / "repo"
     repo.mkdir()

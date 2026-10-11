@@ -99,13 +99,16 @@ def _report_ugrep() -> None:
     _ok("ugrep", path)
 
 
-def _report_pi_mcp_adapter() -> None:
-    """Informational: pi reaches the MCP server only via pi-mcp-adapter."""
+def _report_pi_trust() -> None:
+    """Informational: pi (>= 0.99, built-in MCP) reads a project's .pi/mcp.json
+    only for trusted projects, so the injected server stays invisible until the
+    project is trusted (the first `pi` run in it prompts to trust)."""
     if shutil.which("pi") is None:
         return
     print(
-        "[note] pi: install the pi-mcp-adapter extension so pi can reach the "
-        "recall-engine MCP server (`pi install npm:pi-mcp-adapter`)"
+        "[note] pi: needs pi >= 0.99 (built-in MCP) and reads the injected "
+        ".pi/mcp.json only in trusted projects; if the recall-engine tools do "
+        "not appear, run pi once in the project and accept the trust prompt"
     )
 
 
@@ -140,7 +143,7 @@ def _check_drive_access() -> bool:
     except DriveError as exc:
         _fail("gcloud auth", "Drive access failed", str(exc))
         return False
-    except Exception as exc:  # e.g. network down; never show a stack trace
+    except Exception as exc:  # noqa: BLE001 - e.g. network down; never show a stack trace
         _fail(
             "gcloud auth",
             f"Drive API call failed ({type(exc).__name__}: {exc})",
@@ -176,7 +179,7 @@ def run_doctor(
         _check_drive_access(),
     ]
     _report_ugrep()
-    _report_pi_mcp_adapter()
+    _report_pi_trust()
     _report_codex_trust()
     _report_drive_folder(remote_knowledge_folder)
     return all(results)

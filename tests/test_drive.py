@@ -1,10 +1,12 @@
 import io
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
 import httplib2
 import pytest
 from googleapiclient.errors import HttpError
 from typer.testing import CliRunner
+
 from recall_engine import drive
 from recall_engine.cli import app
 from recall_engine.drive import (
@@ -15,6 +17,7 @@ from recall_engine.drive import (
     sync_download,
     sync_upload,
 )
+
 runner = CliRunner()
 GCLOUD_COMMAND = (
     "gcloud auth application-default login "

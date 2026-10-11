@@ -72,6 +72,8 @@ variables are inherited, so
    `.pi/mcp.json` for pi, `.gemini/settings.json` for gemini, `opencode.json`
    for opencode, `.agents/mcp_config.json` for agy). Only the `recall-engine`
    entry is added; existing content is backed up and restored on exit.
+   opencode gets the v2 shape (`mcp.servers.<name>`), which opencode v1 cannot
+   read.
 5. **Launch the agent** — as a child process with signals forwarded and
    `RECALL_REPO_PATH` set to the resolved repo path. Unknown command
    names (e.g. `claude-company`) are classified via their `--version` output
@@ -102,8 +104,11 @@ Skill trigger reliability is higher on sonnet-tier models than on haiku
 ## Shared MCP server
 
 The knowledge base is served over MCP by a single streamable-HTTP server per
-machine, bound to `127.0.0.1` on an ephemeral port. It exposes one read-only
-tool, one read-only resource, and one read-only resource template:
+machine, bound to `127.0.0.1` on an ephemeral port. It is built on the `mcp`
+Python SDK 2.x and is stateless, so it serves both the handshake-era protocol
+revisions (2024-11-05 through 2025-11-25, which current agent CLIs speak) and
+the per-request 2026-07-28 revision. It exposes one read-only tool, one
+read-only resource, and one read-only resource template:
 
 - `search_knowledge(query)` — matching note paths with snippets and a
   `resource_uri` for each matching note.
@@ -133,11 +138,20 @@ connection to the right notes; an `X-Recall-Token` header rejects clients the
 supervisor did not configure. Two sessions in different directories with
 different repos therefore share a server yet only ever see their own notes.
 
+On the 2026-07-28 revision, list results (`tools/list`, `resources/list`,
+`resources/templates/list`) carry a one-hour public cache hint, since they never
+change while the server runs. Note reads keep `ttlMs: 0` and a private scope:
+notes change on disk and depend on the caller's repo.
+
 Two agents need extra setup to reach the server:
 
-- **pi** requires the `pi-mcp-adapter` extension (`pi install npm:pi-mcp-adapter`).
-  Without it pi cannot reach the server, so `wrap pi` refuses to launch and
-  tells you to install the adapter first.
+- **pi** needs pi >= 0.99, whose built-in MCP reads the injected
+  `.pi/mcp.json` only in trusted projects; the first `pi` run in a project
+  prompts you to trust it. The entry sets `exposure: "direct"` so
+  `search_knowledge` sits in pi's own tool list. The `pi-mcp-adapter`
+  extension is optional: when installed it reads the same file, but asks you
+  to approve the project server before connecting, and again whenever the
+  entry changes (a freshly spawned server has a new port and token).
 - **codex** reads the injected `.codex/config.toml` only in trusted projects;
   the first `codex` run in a project prompts you to trust it. Until then codex
   falls back to the shared `~/.codex/config.toml` and will not see the

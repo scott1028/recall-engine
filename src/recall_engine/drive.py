@@ -47,6 +47,7 @@ def get_gcloud_user_credentials() -> Credentials | None:
         [gcloud, "auth", "print-access-token"],
         capture_output=True,
         text=True,
+        check=False,
     )
     token = result.stdout.strip()
     if result.returncode != 0 or not token:

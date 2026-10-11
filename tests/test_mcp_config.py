@@ -2,15 +2,18 @@ import json
 import os
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
 import pytest
+import tomllib
+
 from recall_engine.agents import AGENTS
 from recall_engine.mcp_config import (
     McpConfigError,
     inject_mcp_config,
     restore_mcp_config,
 )
+
 URL = "http://127.0.0.1:8765/mcp"
 TOKEN = "secret-token"
 @pytest.fixture
@@ -36,7 +39,7 @@ def test_json_config_shapes_matrix(project):
         (
             "claude",
             ".mcp.json",
-            "mcpServers",
+            ("mcpServers",),
             {
                 "url": URL,
                 "headers": None,
@@ -46,7 +49,7 @@ def test_json_config_shapes_matrix(project):
         (
             "gemini",
             ".gemini/settings.json",
-            "mcpServers",
+            ("mcpServers",),
             {
                 "httpUrl": URL,
                 "headers": None,
@@ -55,18 +58,17 @@ def test_json_config_shapes_matrix(project):
         (
             "opencode",
             "opencode.json",
-            "mcp",
+            ("mcp", "servers"),
             {
                 "url": URL,
                 "headers": None,
                 "type": "remote",
-                "enabled": True,
             },
         ),
         (
             "agy",
             ".agents/mcp_config.json",
-            "mcpServers",
+            ("mcpServers",),
             {
                 "serverUrl": URL,
                 "headers": None,
@@ -75,22 +77,23 @@ def test_json_config_shapes_matrix(project):
         (
             "pi",
             ".pi/mcp.json",
-            "mcpServers",
+            ("mcpServers",),
             {
                 "url": URL,
                 "headers": None,
-                "lifecycle": "keep-alive",
-                "directTools": True,
+                "exposure": "direct",
             },
         ),
     ]
-    for agent, relative_path, servers_key, expected_entry in cases:
+    for agent, relative_path, servers_path, expected_entry in cases:
         repo = project / f"repo-{agent}"
         inject_mcp_config(agent, repo, URL, token=TOKEN)
         path = config_path(project, agent)
         assert path == project / relative_path
-        data = json.loads(path.read_text())
-        entry = data[servers_key]["recall-engine"]
+        servers = json.loads(path.read_text())
+        for key in servers_path:
+            servers = servers[key]
+        entry = servers["recall-engine"]
         assert entry == {
             **expected_entry,
             "headers": {
@@ -145,6 +148,21 @@ def test_preexisting_json_backed_up_and_restored(project):
     assert path.read_text() == original  # byte-identical restore
     backup = Path(str(path) + ".recall-engine-mcp-backup")
     assert not backup.exists()
+def test_opencode_entry_nests_under_mcp_servers_beside_user_entries(project):
+    repo = project / "repo"
+    path = config_path(project, "opencode")
+    # A v1-style user entry sits directly under "mcp"; opencode v2 still reads it.
+    original = json.dumps(
+        {"mcp": {"other": {"type": "remote", "url": "http://other", "enabled": True}}},
+        indent=2,
+    )
+    path.write_text(original)
+    inject_mcp_config("opencode", repo, URL, token=TOKEN)
+    data = json.loads(path.read_text())
+    assert data["mcp"]["other"]["url"] == "http://other"
+    assert data["mcp"]["servers"]["recall-engine"]["url"] == URL
+    assert restore_mcp_config(owner_pid=os.getpid()) is True
+    assert path.read_text() == original  # byte-identical restore
 # --- 4. token=None omits X-Recall-Token -------------------------------------
 def test_attach_same_repo_reasserts_entry_no_duplicate_backup(project):
     repo = project / "repo"
@@ -154,7 +172,7 @@ def test_attach_same_repo_reasserts_entry_no_duplicate_backup(project):
     backup = Path(str(path) + ".recall-engine-mcp-backup")
     assert not backup.exists()  # nothing pre-existed -> no backup
     data = json.loads(path.read_text())
-    del data["mcpServers"]["recall-engine"]["lifecycle"]
+    del data["mcpServers"]["recall-engine"]["exposure"]
     path.write_text(json.dumps(data))
     other = live_pid()
     try:
@@ -169,7 +187,7 @@ def test_attach_same_repo_reasserts_entry_no_duplicate_backup(project):
         assert len(record["configs"]) == 1
         assert not backup.exists()
         entry = json.loads(path.read_text())["mcpServers"]["recall-engine"]
-        assert entry["lifecycle"] == "keep-alive"
+        assert entry["exposure"] == "direct"
     finally:
         other.terminate()
         other.wait()
@@ -259,15 +277,16 @@ def test_preexisting_jsonc_and_empty_configs_restore(project):
         assert not Path(str(path) + ".recall-engine-mcp-backup").exists()
 def test_malformed_json_cases_preserve_file_and_do_not_backup(project):
     cases = [
-        ('{"mcpServers": oops', "not valid JSON"),
-        ("[]", "not a JSON object"),
+        ("claude", '{"mcpServers": oops', "not valid JSON"),
+        ("claude", "[]", "not a JSON object"),
+        ("opencode", '{"mcp": {"servers": []}}', "'mcp.servers' is not a JSON object"),
     ]
-    for original, error in cases:
+    for agent, original, error in cases:
         repo = project / f"repo-{len(original)}"
-        path = config_path(project, "claude")
+        path = config_path(project, agent)
         path.write_text(original)
         with pytest.raises(McpConfigError, match=error):
-            inject_mcp_config("claude", repo, URL)
+            inject_mcp_config(agent, repo, URL)
         assert path.read_text() == original
         assert not marker_path(project).exists()
         assert not Path(str(path) + ".recall-engine-mcp-backup").exists()

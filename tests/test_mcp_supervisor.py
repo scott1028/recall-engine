@@ -5,8 +5,12 @@ trivial TCP listener so the PID-file/refcount logic is exercised in isolation.
 import os
 import subprocess
 import sys
+
 import pytest
+
 from recall_engine import mcp_supervisor as sup
+
+
 @pytest.fixture
 def tmp_state(monkeypatch, tmp_path):
     """Point the supervisor's state/lock/log files at a fresh temp dir."""

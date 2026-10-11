@@ -19,17 +19,17 @@ class McpConfigSpec:
     A single running HTTP server serves every repo; the per-project config
     carries the repo in a request header (see header_field), so the server
     routes each connection to the right knowledge repo. The fields below
-    capture the per-agent schema differences (top-level key, URL field name,
+    capture the per-agent schema differences (servers key path, URL field name,
     optional transport `type`, header field, file format).
     """
 
     config_path: str  # project-relative config file
     fmt: str  # "json" | "toml"
-    servers_key: str  # top-level table/object key ("mcpServers" | "mcp" | "mcp_servers")
+    servers_path: tuple[str, ...]  # keys down to the servers table, e.g. ("mcp", "servers")
     url_field: str  # "url" | "httpUrl" | "serverUrl"
     header_field: str  # "headers" | "http_headers"
     type_value: str | None = None  # transport tag: "http" (claude) | "remote" (opencode)
-    extra_fields: dict = field(default_factory=dict)  # e.g. {"enabled": True}
+    extra_fields: dict = field(default_factory=dict)  # e.g. {"exposure": "direct"}
 
 
 @dataclass(frozen=True)
@@ -54,7 +54,7 @@ AGENTS: dict[str, AgentSpec] = {
         mcp=McpConfigSpec(
             config_path=".mcp.json",
             fmt="json",
-            servers_key="mcpServers",
+            servers_path=("mcpServers",),
             url_field="url",
             header_field="headers",
             type_value="http",
@@ -70,7 +70,7 @@ AGENTS: dict[str, AgentSpec] = {
         mcp=McpConfigSpec(
             config_path=".codex/config.toml",
             fmt="toml",
-            servers_key="mcp_servers",
+            servers_path=("mcp_servers",),
             url_field="url",
             header_field="http_headers",
         ),
@@ -80,19 +80,18 @@ AGENTS: dict[str, AgentSpec] = {
         skills_dir=".pi/skills",
         version_signature=None,  # `pi --version` prints a bare version number
         install_hint="install pi: https://github.com/earendil-works/pi",
-        # pi via pi-mcp-adapter reads .pi/mcp.json (kept distinct from Claude's
-        # project-root .mcp.json to avoid a collision). lifecycle "keep-alive"
-        # makes the adapter connect at startup and auto-reconnect on drop;
-        # without it the entry defaults to "lazy" and pi never auto-connects.
-        # directTools registers the server's search tool directly in pi's tool
-        # list instead of hiding it behind the `mcp` proxy the LLM must search.
+        # pi >= 0.99 has built-in MCP that reads .pi/mcp.json in trusted
+        # projects; pi-mcp-adapter, when installed, reads the same file instead.
+        # exposure "direct" puts the search tool straight in pi's tool list
+        # (the adapter maps it to directTools) rather than behind a proxy.
+        # Verified: pi 1.1.0 built-in and pi-mcp-adapter 5.1.0.
         mcp=McpConfigSpec(
             config_path=".pi/mcp.json",
             fmt="json",
-            servers_key="mcpServers",
+            servers_path=("mcpServers",),
             url_field="url",
             header_field="headers",
-            extra_fields={"lifecycle": "keep-alive", "directTools": True},
+            extra_fields={"exposure": "direct"},
         ),
     ),
     "gemini": AgentSpec(
@@ -104,7 +103,7 @@ AGENTS: dict[str, AgentSpec] = {
         mcp=McpConfigSpec(
             config_path=".gemini/settings.json",
             fmt="json",
-            servers_key="mcpServers",
+            servers_path=("mcpServers",),
             url_field="httpUrl",
             header_field="headers",
         ),
@@ -114,15 +113,16 @@ AGENTS: dict[str, AgentSpec] = {
         skills_dir=".opencode/skills",  # opencode reads only .opencode/skills per project
         version_signature=None,  # `opencode --version` prints a bare version number
         install_hint="install the opencode CLI",
-        # opencode: opencode.json, remote server under top-level "mcp".
+        # opencode v2: opencode.json, remote server under "mcp.servers"; v2
+        # replaced `enabled` with `disabled` (default false), so neither is set.
+        # opencode v1 cannot read this shape. Verified: opencode 2.0.26.
         mcp=McpConfigSpec(
             config_path="opencode.json",
             fmt="json",
-            servers_key="mcp",
+            servers_path=("mcp", "servers"),
             url_field="url",
             header_field="headers",
             type_value="remote",
-            extra_fields={"enabled": True},
         ),
     ),
     "agy": AgentSpec(
@@ -137,7 +137,7 @@ AGENTS: dict[str, AgentSpec] = {
         mcp=McpConfigSpec(
             config_path=".agents/mcp_config.json",
             fmt="json",
-            servers_key="mcpServers",
+            servers_path=("mcpServers",),
             url_field="serverUrl",
             header_field="headers",
         ),

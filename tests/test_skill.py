@@ -3,8 +3,16 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
 import pytest
-from recall_engine.skill import SkillError, detect_active_repo, inject_skill, restore_skill
+
+from recall_engine.skill import (
+    SkillError,
+    detect_active_repo,
+    inject_skill,
+    restore_skill,
+)
+
 # Skills dirs that receive a symlink to the SSOT skill in .agents/skills/.
 # codex and agy read .agents/skills directly, so they are not listed here.
 LINK_SKILLS_DIRS = (".claude/skills", ".gemini/skills", ".pi/skills", ".opencode/skills")

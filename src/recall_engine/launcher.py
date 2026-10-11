@@ -16,10 +16,6 @@ from recall_engine.agents import AGENTS
 # (literal interpolation keeps alias/function resolution working).
 _AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
-# pi reaches the MCP server only through this extension; without it the injected
-# .pi/mcp.json is inert, so `wrap pi` must block until the user installs it.
-PI_MCP_ADAPTER = "pi-mcp-adapter"
-
 
 class LauncherError(Exception):
     """The agent cannot be launched."""
@@ -48,6 +44,7 @@ def _resolve_bash_file_command(
         ),
         capture_output=True,
         env=env,
+        check=False,
     )
     if probe.returncode != 0:
         return None
@@ -74,6 +71,7 @@ def detect_agent(agent: str) -> str | None:
             _interactive_shell_command(_resolve_shell(), f"{agent} --version"),
             capture_output=True,
             timeout=30,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return None
@@ -89,48 +87,6 @@ def detect_agent(agent: str) -> str | None:
         if family in tokens:
             return family
     return None
-
-
-def pi_mcp_adapter_installed(agent: str) -> bool | None:
-    """Whether `<agent> list` reports the pi-mcp-adapter extension.
-
-    Returns True when the adapter is present, False when pi runs but the
-    adapter is absent, and None when it cannot be determined (pi not runnable,
-    probe failed/timed out) so the caller falls back to the normal launch path
-    and its 'install pi' error. Bash file commands are resolved through the
-    shell and then probed directly with stdin closed, so pi's project-trust
-    prompt can never block the probe or disturb the foreground terminal.
-    """
-    if not _AGENT_NAME_RE.match(agent):
-        return None
-    env = {
-        **os.environ,
-        "_RECALL_PATH": os.environ.get("PATH", ""),
-    }
-    shell = _resolve_shell()
-    resolved_file = _resolve_bash_file_command(shell, agent, env)
-    if resolved_file is None and Path(shell).name == "bash":
-        return None
-    command = (
-        [resolved_file, "list"]
-        if resolved_file is not None
-        else _interactive_shell_command(
-            shell, f'PATH="$_RECALL_PATH:$PATH"; {agent} list'
-        )
-    )
-    try:
-        probe = subprocess.run(
-            command,
-            capture_output=True,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired:
-        return None
-    if probe.returncode != 0:
-        return None
-    return PI_MCP_ADAPTER in (probe.stdout + probe.stderr).decode(errors="replace")
 
 
 def launch_agent(
@@ -168,6 +124,7 @@ def launch_agent(
         _interactive_shell_command(shell, f"command -v {agent}"),
         capture_output=True,
         env=env,
+        check=False,
     )
     if probe.returncode != 0:
         raise LauncherError(

@@ -25,7 +25,9 @@ without granting a sandboxed agent filesystem access to them.
 - The CLI entry point is `recall-engine`.
 - The CLI is built with Typer.
 - Google Drive access uses `google-api-python-client` and `google-auth`.
-- The MCP server is built on the `mcp` SDK (FastMCP, streamable HTTP).
+- The MCP server is built on the `mcp` SDK 2.x (`MCPServer`, stateless
+  streamable HTTP) and serves both the handshake-era protocol revisions and the
+  2026-07-28 revision.
 - The implemented commands are `wrap`, `unwrap`, `sync`, and `doctor`, plus a
   hidden `mcp-serve` used internally to spawn the shared server.
 - The project uses `uv run pytest` and `uv run ruff check src tests` for checks.
@@ -161,6 +163,10 @@ Scenario: register the MCP server in the agent's config
   (`.mcp.json` for claude, `.codex/config.toml` for codex, `.pi/mcp.json` for
   pi, `.gemini/settings.json` for gemini, `opencode.json` for opencode, and
   `.agents/mcp_config.json` for agy)
+- And the opencode entry uses the opencode v2 shape (`mcp.servers.<name>`,
+  no `enabled` field), which opencode v1 cannot read
+- And the pi entry sets `exposure: "direct"`, so pi's built-in MCP (and
+  pi-mcp-adapter, which maps it to `directTools`) lists the search tool directly
 - And the entry carries the server URL, an `X-Recall-Repo` header naming the
   resolved repo, and an `X-Recall-Token` header
 - And the entry is removed when the session ends
@@ -186,7 +192,7 @@ Scenario: tolerate a commented or empty pre-existing config
 
 Scenario: patch an outdated entry on a new wrap
 - Given an earlier version injected the `recall-engine` entry without a field
-  the current version adds (e.g. pi's `lifecycle`)
+  the current version adds (e.g. pi's `exposure`)
 - When a new wrap session registers the MCP server
 - Then the entry is re-asserted so the missing field is patched in
 - And no duplicate backup is created for an already-registered config
@@ -264,6 +270,17 @@ Scenario: fail loudly when the server cannot start
 - Then the wait fails instead of hanging or launching the agent against a dead
   server
 
+Scenario: serve both protocol eras
+- Given the shared server is running
+- When a client connects with the initialize handshake (revisions 2024-11-05
+  through 2025-11-25)
+- Then the handshake succeeds and every tool and resource works
+- And when a client instead probes `server/discover` and speaks the per-request
+  2026-07-28 revision, the same tool and resources work without a session
+- And `X-Recall-Repo` / `X-Recall-Token` routing behaves the same in both eras
+- And on 2026-07-28, list results carry a one-hour public cache hint, while
+  note reads stay `ttlMs: 0` and private because notes change on disk
+
 Scenario: reuse the server for a later wrap
 - Given a recall-engine MCP server is already running and reachable
 - When a second `wrap` starts, in any directory and against any repo
@@ -306,10 +323,10 @@ Scenario: reclaim a stale server record
 - Then the stale record is replaced by a freshly spawned server
 
 Scenario: reach the server from pi
-- Given `pi` is installed without the `pi-mcp-adapter` extension
+- Given `pi` >= 0.99, whose built-in MCP reads `.pi/mcp.json` in trusted projects
 - When the user runs `recall-engine wrap pi`
-- Then `wrap` refuses to launch and tells the user to install the adapter first
-- And `doctor` also advises installing it
+- Then `wrap` launches pi whether or not `pi-mcp-adapter` is installed
+- And `doctor` notes that pi needs >= 0.99 and a trusted project
 
 ## Feature: Search the Knowledge Base
 

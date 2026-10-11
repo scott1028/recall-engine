@@ -10,13 +10,22 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+from collections.abc import Mapping
+from contextvars import ContextVar
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import uvicorn
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.caching import CacheHint
+from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError
 
-from recall_engine import search
+from recall_engine import __version__, search
 from recall_engine.template_renderer import render_template
+
+if TYPE_CHECKING:
+    from starlette.applications import Starlette
 
 INSTRUCTIONS = render_template("rules/mcp_server_instructions.md").strip()
 
@@ -24,6 +33,31 @@ MAX_MATCHES = 50
 NOTE_RESOURCE_TEMPLATE = "recall://note/{encoded_path}"
 NOTES_INDEX_RESOURCE = "recall://notes/index"
 ENCODED_NOTE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Lists never vary per request, so clients may cache and share them. Reads keep
+# the SDK default (ttlMs=0, private): notes change on disk and depend on the repo.
+LIST_CACHE_HINT = CacheHint(ttl_ms=3_600_000, scope="public")
+CACHE_HINTS = {
+    "tools/list": LIST_CACHE_HINT,
+    "resources/list": LIST_CACHE_HINT,
+    "resources/templates/list": LIST_CACHE_HINT,
+}
+
+# Headers of the request being handled. The SDK injects no Context into a static
+# resource (recall://notes/index), so a middleware publishes them here instead.
+_request_headers: ContextVar[Mapping[str, str] | None] = ContextVar(
+    "recall_request_headers", default=None
+)
+
+
+async def _publish_request_headers(
+    ctx: ServerRequestContext[Any, Any], call_next: CallNext
+) -> HandlerResult:
+    token = _request_headers.set(getattr(ctx.request, "headers", None))
+    try:
+        return await call_next(ctx)
+    finally:
+        _request_headers.reset(token)
 
 
 def encode_note_resource_path(relative_path: str) -> str:
@@ -50,28 +84,38 @@ def decode_note_resource_path(encoded_path: str) -> str:
     return relative_path
 
 
-def create_server(token: str | None = None) -> FastMCP:
+def create_server(token: str | None = None) -> MCPServer:
     """Build the recall-engine server with its search tool and note resources.
 
     If ``token`` is not None, every tool and resource request rejects a client
     whose ``X-Recall-Token`` header does not equal ``token``.
     """
-    mcp = FastMCP("recall-engine", stateless_http=True, instructions=INSTRUCTIONS)
+    mcp = MCPServer(
+        "recall-engine",
+        instructions=INSTRUCTIONS,
+        version=__version__,
+        cache_hints=CACHE_HINTS,
+        middleware=[_publish_request_headers],
+    )
 
-    def resolve_repo(ctx: Context) -> Path:
-        """Resolve and authorize the target repo from the request headers."""
-        headers = ctx.request_context.request.headers
+    def resolve_repo() -> Path:
+        """Resolve and authorize the target repo from the request headers.
+
+        Raises ResourceError: the SDK passes its message on from resources and,
+        as an is_error result, from tools.
+        """
+        headers = _request_headers.get() or {}
         repo_header = headers.get("x-recall-repo")
         if not repo_header:
-            raise ValueError("missing X-Recall-Repo header")
+            raise ResourceError("missing X-Recall-Repo header")
         repo = Path(repo_header).resolve()
         if not repo.is_dir() or not (repo / "src").is_dir():
-            raise ValueError(
+            raise ResourceError(
                 f"X-Recall-Repo does not point to a knowledge repo with a "
                 f"src/ directory: {repo_header}"
             )
         if token is not None and headers.get("x-recall-token") != token:
-            raise ValueError("invalid or missing X-Recall-Token")
+            raise ResourceError("invalid or missing X-Recall-Token")
         return repo
 
     def resolve_note(src: Path, path: str) -> Path:
@@ -85,9 +129,9 @@ def create_server(token: str | None = None) -> FastMCP:
         candidate = Path(path)
         note = candidate if candidate.is_absolute() else src / candidate
         if ".." in note.parts or not search.is_note_inside(src, note):
-            raise ValueError(f"path is outside the knowledge repo src/ directory: {path}")
+            raise ResourceError(f"path is outside the knowledge repo src/ directory: {path}")
         if not note.is_file():
-            raise ValueError(f"note not found: {path}")
+            raise ResourceNotFoundError(f"note not found: {path}")
         return note
 
     def note_resource_uri(src: Path, note: Path) -> str:
@@ -102,12 +146,12 @@ def create_server(token: str | None = None) -> FastMCP:
         }
 
     @mcp.tool()
-    def search_knowledge(query: str, ctx: Context) -> list[dict]:
+    def search_knowledge(query: str) -> list[dict]:
         """Case-insensitive substring search across <repo>/src/**/*.md.
 
         Runs ugrep when it is on PATH; falls back to a built-in scan otherwise.
         """
-        src = (resolve_repo(ctx) / "src").resolve()
+        src = (resolve_repo() / "src").resolve()
         return [
             {
                 "path": str(note),
@@ -128,8 +172,7 @@ def create_server(token: str | None = None) -> FastMCP:
     )
     def notes_index() -> list[dict[str, str]]:
         """List Markdown notes in the selected recall-engine knowledge repo."""
-        ctx = mcp.get_context()
-        src = (resolve_repo(ctx) / "src").resolve()
+        src = (resolve_repo() / "src").resolve()
         return [
             note_index_entry(src, note)
             for note in search.iter_note_paths(src)
@@ -142,17 +185,27 @@ def create_server(token: str | None = None) -> FastMCP:
         description="Read one Markdown note from the selected recall-engine knowledge repo.",
         mime_type="text/markdown",
     )
-    def note(encoded_path: str, ctx: Context) -> str:
+    def note(encoded_path: str) -> str:
         """Read one Markdown note from the selected recall-engine knowledge repo."""
-        src = (resolve_repo(ctx) / "src").resolve()
-        note_path = decode_note_resource_path(encoded_path)
+        src = (resolve_repo() / "src").resolve()
+        try:
+            note_path = decode_note_resource_path(encoded_path)
+        except ValueError as exc:
+            raise ResourceError(str(exc)) from exc
         return resolve_note(src, note_path).read_text(encoding="utf-8", errors="replace")
 
     return mcp
 
 
+def create_app(token: str | None = None, host: str = "127.0.0.1") -> Starlette:
+    """Build the stateless streamable-HTTP ASGI app.
+
+    Stateless serves both handshake-era clients and 2026-07-28 per-request
+    clients without keeping sessions.
+    """
+    return create_server(token).streamable_http_app(stateless_http=True, host=host)
+
+
 def run_server(host: str, port: int, token: str | None = None) -> None:
     """Serve the recall-engine MCP server over streamable HTTP (blocking)."""
-    mcp = create_server(token)
-    app = mcp.streamable_http_app()
-    uvicorn.run(app, host=host, port=port, log_level="error")
+    uvicorn.run(create_app(token, host), host=host, port=port, log_level="error")

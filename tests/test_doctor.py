@@ -1,10 +1,13 @@
 from unittest.mock import MagicMock
+
 import pytest
 from typer.testing import CliRunner
+
 from recall_engine import doctor
 from recall_engine.cli import app
 from recall_engine.doctor import run_doctor
 from recall_engine.mcp_supervisor import ServerStatus
+
 runner = CliRunner()
 def install_passing_deps(monkeypatch) -> None:
     """Make every check pass without touching the real environment."""

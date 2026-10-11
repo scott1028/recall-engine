@@ -4,13 +4,16 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
 import pytest
+
 from recall_engine.launcher import (
     LauncherError,
     detect_agent,
     launch_agent,
-    pi_mcp_adapter_installed,
 )
+
+
 def isolate_shell(tmp_path, monkeypatch) -> None:
     """Point HOME/SHELL at the sandbox so the real ~/.bashrc is not sourced."""
     home = tmp_path / "home"
@@ -119,55 +122,6 @@ def test_bash_file_command_launches_directly_without_interactive_shell(
     assert out.read_text().strip() == "direct"
 
 
-def test_pi_adapter_probe_preserves_inherited_path_priority(tmp_path, monkeypatch):
-    # Regression: the probe must use the same pi that the current terminal
-    # would run, even if the rc file prepends another pi on shell startup.
-    install_fake_pi(tmp_path, monkeypatch, "User packages: npm:pi-mcp-adapter")
-    shadow_dir = tmp_path / "shadow"
-    shadow_dir.mkdir()
-    stub = shadow_dir / "pi"
-    stub.write_text('#!/bin/sh\nif [ "$1" = "list" ]; then echo "User packages:"; fi\n')
-    stub.chmod(0o755)
-    # Terminal PATH: the real pi wins, the shadow dir trails behind it.
-    monkeypatch.setenv("PATH", os.environ["PATH"] + os.pathsep + str(shadow_dir))
-    bashrc = Path(os.environ["HOME"]) / ".bashrc"
-    bashrc.write_text(f'export PATH="{shadow_dir}:$PATH"\n')
-
-    assert pi_mcp_adapter_installed("pi") is True
-
-
-def test_pi_adapter_probe_runs_file_command_directly(tmp_path, monkeypatch):
-    out = tmp_path / "probe.txt"
-    pi = tmp_path / "pi"
-    pi.write_text(
-        "#!/bin/sh\n"
-        f'echo "$1" > "{out}"\n'
-        'if [ "$1" = "list" ]; then echo "npm:pi-mcp-adapter"; fi\n'
-    )
-    pi.chmod(0o755)
-    fake_bash = tmp_path / "bash"
-    fake_bash.write_text(
-        "#!/bin/sh\n"
-        'if [ "$1" = "+m" ] && [ "$2" = "-i" ] && [ "$3" = "-c" ]; then\n'
-        '  case "$4" in\n'
-        '    *"type -t pi"*)\n'
-        f'      printf "file\\n%s\\n" "{pi}"\n'
-        "      exit 0\n"
-        "      ;;\n"
-        '    *"pi list"*)\n'
-        f'      echo shell-list > "{out}"\n'
-        "      exit 0\n"
-        "      ;;\n"
-        "  esac\n"
-        "fi\n"
-        "exit 99\n"
-    )
-    fake_bash.chmod(0o755)
-    monkeypatch.setenv("SHELL", str(fake_bash))
-    monkeypatch.setenv("PATH", str(tmp_path))
-
-    assert pi_mcp_adapter_installed("pi") is True
-    assert out.read_text().strip() == "list"
 def test_missing_claude_raises(tmp_path, monkeypatch):
     isolate_shell(tmp_path, monkeypatch)
     empty = tmp_path / "empty"
@@ -210,29 +164,6 @@ def test_detect_agent_rejects_unknown_missing_and_unsafe_names(tmp_path, monkeyp
     monkeypatch.setenv("PATH", str(empty))
     assert detect_agent("no-such-agent") is None
     assert detect_agent("claude; rm -rf /") is None
-def install_fake_pi(tmp_path, monkeypatch, list_output: str, name: str = "pi") -> Path:
-    """Put a fake pi on PATH whose `list` subcommand prints list_output."""
-    bin_dir = install_fake_claude(
-        tmp_path,
-        monkeypatch,
-        'if [ "$1" = "list" ]; then\n'
-        f"  printf '%s\\n' '{list_output}'\n"
-        "  exit 0\n"
-        "fi\n"
-        "exit 0",
-        name=name,
-    )
-    return bin_dir
-def test_pi_mcp_adapter_detection_matrix(tmp_path, monkeypatch):
-    install_fake_pi(tmp_path, monkeypatch, "User packages:  npm:pi-mcp-adapter")
-    assert pi_mcp_adapter_installed("pi") is True
-    install_fake_pi(tmp_path, monkeypatch, "User packages:  npm:pi-web-access")
-    assert pi_mcp_adapter_installed("pi") is False
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    monkeypatch.setenv("PATH", str(empty))
-    assert pi_mcp_adapter_installed("pi") is None
-    assert pi_mcp_adapter_installed("pi; rm -rf /") is None
 def test_sighup_does_not_kill_wrapper_before_teardown(tmp_path, monkeypatch):
     # Closing the terminal sends SIGHUP. Default SIGHUP would terminate the
     # wrapper before wrap's finally can restore the injected config; launch_agent
@@ -248,10 +179,12 @@ def test_sighup_does_not_kill_wrapper_before_teardown(tmp_path, monkeypatch):
         [
             sys.executable,
             "-c",
-            "import sys\n"
-            "from pathlib import Path\n"
-            "from recall_engine.launcher import launch_agent\n"
-            "sys.exit(launch_agent(Path(sys.argv[1]), agent='claude'))",
+            (
+                "import sys\n"
+                "from pathlib import Path\n"
+                "from recall_engine.launcher import launch_agent\n"
+                "sys.exit(launch_agent(Path(sys.argv[1]), agent='claude'))"
+            ),
             str(tmp_path / "repo"),
         ],
         env=os.environ.copy(),
