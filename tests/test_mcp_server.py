@@ -1,5 +1,5 @@
 """End-to-end tests for the recall-engine MCP server.
-Each test starts a real streamable-HTTP server in a background thread and drives
+Each test starts a real streamable-HTTP server in a background thread and runs
 it through a real mcp Client, once per protocol era: the initialize handshake
 (what current agent CLIs speak) and the 2026-07-28 per-request protocol. The
 project uses plain pytest (no pytest-asyncio), so async flows run via
@@ -50,21 +50,21 @@ async def _run_client(endpoint, request, headers):
         transport = streamable_http_client(endpoint.url, http_client=http_client)
         async with Client(transport, mode=endpoint.mode) as client:
             return await request(client)
-def run_client(endpoint, request, *, repo=None, token=None):
+def run_client(endpoint, request, *, paths=None, token=None):
     """Open a fresh client connection, run one request, return its result."""
     headers = {}
-    if repo is not None:
-        headers["X-Recall-Repo"] = repo
+    if paths is not None:
+        headers["X-Recall-Paths"] = json.dumps(paths)
     if token is not None:
         headers["X-Recall-Token"] = token
     return asyncio.run(_run_client(endpoint, request, headers))
-def call_tool(endpoint, tool, args, *, repo=None, token=None):
+def call_tool(endpoint, tool, args, *, paths=None, token=None):
     return run_client(
-        endpoint, lambda client: client.call_tool(tool, args), repo=repo, token=token
+        endpoint, lambda client: client.call_tool(tool, args), paths=paths, token=token
     )
-def read_resource(endpoint, uri, *, repo=None, token=None):
+def read_resource(endpoint, uri, *, paths=None, token=None):
     return run_client(
-        endpoint, lambda client: client.read_resource(uri), repo=repo, token=token
+        endpoint, lambda client: client.read_resource(uri), paths=paths, token=token
     )
 def exception_text(exc: BaseException) -> str:
     messages = [str(exc)]
@@ -73,19 +73,18 @@ def exception_text(exc: BaseException) -> str:
         for nested in nested_exceptions:
             messages.append(exception_text(nested))
     return "\n".join(messages)
-def make_repo(base: Path, notes: dict[str, str]) -> Path:
-    """Create <base>/src with the given {relative_md_path: text} notes."""
-    src = base / "src"
-    src.mkdir(parents=True)
+def make_root(base: Path, notes: dict[str, str]) -> Path:
+    """Create `base` with the given {relative_md_path: text} notes."""
+    base.mkdir(parents=True)
     for rel, text in notes.items():
-        note = src / rel
+        note = base / rel
         note.parent.mkdir(parents=True, exist_ok=True)
         note.write_text(text)
     return base
-def note_path(repo: Path, rel: str) -> str:
-    return str((repo / "src" / rel).resolve())
-def note_resource_uri(rel: str) -> str:
-    encoded = base64.urlsafe_b64encode(rel.encode()).decode().rstrip("=")
+def note_path(root: Path, rel: str) -> str:
+    return str((root / rel).resolve())
+def note_resource_uri(absolute_path: str) -> str:
+    encoded = base64.urlsafe_b64encode(absolute_path.encode()).decode().rstrip("=")
     return f"recall://note/{encoded}"
 @pytest.fixture(scope="module")
 def server_url():
@@ -128,101 +127,156 @@ def test_public_mcp_shape_is_advertised(server):
     assert "recall://note/{encoded_path}" in templates
     assert templates["recall://note/{encoded_path}"].mime_type == "text/markdown"
 def test_search_knowledge_hit_and_miss(server, tmp_path):
-    repo = make_repo(
-        tmp_path / "repo",
+    root = make_root(
+        tmp_path / "kb",
         {
             "guide.md": "Deploy uses blue-green rollout.\nRollback is manual.\n",
             "sub/notes.md": "Nothing relevant here.\n",
         },
     )
-    hit = call_tool(server, "search_knowledge", {"query": "blue-green"}, repo=str(repo))
+    hit = call_tool(server, "search_knowledge", {"query": "blue-green"}, paths=[str(root)])
     assert not hit.is_error
     matches = hit.structured_content["result"]
     assert len(matches) == 1
-    assert matches[0]["path"] == note_path(repo, "guide.md")
+    assert matches[0]["path"] == note_path(root, "guide.md")
     assert matches[0]["line"] == 1
     assert "blue-green" in matches[0]["snippet"]
-    assert matches[0]["resource_uri"] == note_resource_uri("guide.md")
-    miss = call_tool(server, "search_knowledge", {"query": "kubernetes"}, repo=str(repo))
+    assert matches[0]["resource_uri"] == note_resource_uri(note_path(root, "guide.md"))
+    miss = call_tool(server, "search_knowledge", {"query": "kubernetes"}, paths=[str(root)])
     assert not miss.is_error
     assert miss.structured_content["result"] == []
 def test_search_falls_back_to_scan_without_ugrep(server, tmp_path, monkeypatch):
     # ugrep is optional: with it off PATH the tool still answers, via the scan.
-    repo = make_repo(tmp_path / "fb", {"n.md": "fallback keyword here\n"})
+    root = make_root(tmp_path / "fb", {"n.md": "fallback keyword here\n"})
     monkeypatch.setattr("recall_engine.search.ugrep_path", lambda: None)
-    res = call_tool(server, "search_knowledge", {"query": "keyword"}, repo=str(repo))
+    res = call_tool(server, "search_knowledge", {"query": "keyword"}, paths=[str(root)])
     assert not res.is_error
-    assert [m["path"] for m in res.structured_content["result"]] == [note_path(repo, "n.md")]
-def test_header_routing_between_repos(server, tmp_path):
-    repo_a = make_repo(tmp_path / "a", {"a.md": "alpha keyword here\n"})
-    repo_b = make_repo(tmp_path / "b", {"b.md": "alpha keyword here\n"})
-    res_a = call_tool(server, "search_knowledge", {"query": "alpha"}, repo=str(repo_a))
-    res_b = call_tool(server, "search_knowledge", {"query": "alpha"}, repo=str(repo_b))
-    assert [m["path"] for m in res_a.structured_content["result"]] == [note_path(repo_a, "a.md")]
-    assert [m["path"] for m in res_b.structured_content["result"]] == [note_path(repo_b, "b.md")]
-def test_notes_index_resource_uses_request_repo(server, tmp_path):
-    repo = make_repo(
-        tmp_path / "repo",
+    assert [m["path"] for m in res.structured_content["result"]] == [note_path(root, "n.md")]
+def test_header_routing_between_roots(server, tmp_path):
+    root_a = make_root(tmp_path / "a", {"a.md": "alpha keyword here\n"})
+    root_b = make_root(tmp_path / "b", {"b.md": "alpha keyword here\n"})
+    res_a = call_tool(server, "search_knowledge", {"query": "alpha"}, paths=[str(root_a)])
+    res_b = call_tool(server, "search_knowledge", {"query": "alpha"}, paths=[str(root_b)])
+    assert [m["path"] for m in res_a.structured_content["result"]] == [note_path(root_a, "a.md")]
+    assert [m["path"] for m in res_b.structured_content["result"]] == [note_path(root_b, "b.md")]
+def test_search_merges_multiple_roots(server, tmp_path):
+    root_a = make_root(tmp_path / "kb-a", {"note.md": "alpha keyword in a\n"})
+    root_b = make_root(tmp_path / "kb-b", {"note.md": "alpha keyword in b\n"})
+    res = call_tool(
+        server, "search_knowledge", {"query": "alpha"}, paths=[str(root_a), str(root_b)]
+    )
+    assert not res.is_error
+    assert [m["path"] for m in res.structured_content["result"]] == [
+        note_path(root_a, "note.md"),
+        note_path(root_b, "note.md"),
+    ]
+def test_notes_index_resource_uses_request_roots(server, tmp_path):
+    root = make_root(
+        tmp_path / "kb",
         {"b.md": "x\n", "a.md": "y\n", "sub/c.md": "z\n"},
     )
-    res = read_resource(server, "recall://notes/index", repo=str(repo))
+    res = read_resource(server, "recall://notes/index", paths=[str(root)])
     content = res.contents[0]
     assert content.mime_type == "application/json"
     assert json.loads(content.text) == [
         {
-            "path": note_path(repo, "a.md"),
+            "path": note_path(root, "a.md"),
             "relative_path": "a.md",
-            "resource_uri": note_resource_uri("a.md"),
+            "resource_uri": note_resource_uri(note_path(root, "a.md")),
         },
         {
-            "path": note_path(repo, "b.md"),
+            "path": note_path(root, "b.md"),
             "relative_path": "b.md",
-            "resource_uri": note_resource_uri("b.md"),
+            "resource_uri": note_resource_uri(note_path(root, "b.md")),
         },
         {
-            "path": note_path(repo, "sub/c.md"),
+            "path": note_path(root, "sub/c.md"),
             "relative_path": "sub/c.md",
-            "resource_uri": note_resource_uri("sub/c.md"),
+            "resource_uri": note_resource_uri(note_path(root, "sub/c.md")),
         },
     ]
+def test_same_relative_path_under_different_roots_reads_separately(server, tmp_path):
+    # Resource URIs encode absolute paths, so identically named notes in
+    # different roots never collide.
+    root_a = make_root(tmp_path / "kb-a", {"doc.md": "note in a\n"})
+    root_b = make_root(tmp_path / "kb-b", {"doc.md": "note in b\n"})
+    index = read_resource(
+        server, "recall://notes/index", paths=[str(root_a), str(root_b)]
+    )
+    entries = json.loads(index.contents[0].text)
+    assert [e["relative_path"] for e in entries] == ["doc.md", "doc.md"]
+    uri_a = note_resource_uri(note_path(root_a, "doc.md"))
+    uri_b = note_resource_uri(note_path(root_b, "doc.md"))
+    assert sorted(e["resource_uri"] for e in entries) == sorted([uri_a, uri_b])
+    note_a = read_resource(server, uri_a, paths=[str(root_a), str(root_b)])
+    note_b = read_resource(server, uri_b, paths=[str(root_a), str(root_b)])
+    assert note_a.contents[0].text == "note in a\n"
+    assert note_b.contents[0].text == "note in b\n"
+def test_non_ascii_root_path_round_trips_through_header(server, tmp_path):
+    # The header carries JSON with the default ensure_ascii=True, so non-ASCII
+    # directory names survive the wire and still resolve.
+    root = make_root(tmp_path / "知識庫", {"筆記.md": "unicode keyword\n"})
+    res = call_tool(server, "search_knowledge", {"query": "keyword"}, paths=[str(root)])
+    assert not res.is_error
+    matches = res.structured_content["result"]
+    assert [m["path"] for m in matches] == [note_path(root, "筆記.md")]
+    note = read_resource(
+        server, matches[0]["resource_uri"], paths=[str(root)]
+    )
+    assert note.contents[0].text == "unicode keyword\n"
 def test_note_resource_reads_nested_markdown_note(server, tmp_path):
-    repo = make_repo(tmp_path / "repo", {"sub/doc.md": "# Title\nfull note text\n"})
-    res = read_resource(server, note_resource_uri("sub/doc.md"), repo=str(repo))
+    root = make_root(tmp_path / "kb", {"sub/doc.md": "# Title\nfull note text\n"})
+    uri = note_resource_uri(note_path(root, "sub/doc.md"))
+    res = read_resource(server, uri, paths=[str(root)])
     content = res.contents[0]
     assert content.mime_type == "text/markdown"
-    assert str(content.uri) == note_resource_uri("sub/doc.md")
+    assert str(content.uri) == uri
     assert content.text == "# Title\nfull note text\n"
-    # Reads are never cached: notes change on disk and depend on the repo.
+    # Reads are never cached: notes change on disk and depend on the roots.
     assert (res.ttl_ms, res.cache_scope) == (0, "private")
 def test_note_resource_rejects_invalid_paths(server, tmp_path):
-    repo = make_repo(tmp_path / "repo", {"doc.md": "safe note\n"})
-    (repo / "secret.md").write_text("outside src\n")
+    root = make_root(tmp_path / "kb", {"doc.md": "safe note\n"})
+    secret = tmp_path / "secret.md"
+    secret.write_text("outside any root\n")
     cases = [
         ("recall://note/not-valid-***", "invalid encoded note path"),
-        (f"{note_resource_uri('doc.md')}***", "invalid encoded note path"),
-        (note_resource_uri("../secret.md"), "outside"),
+        (f"{note_resource_uri(note_path(root, 'doc.md'))}***", "invalid encoded note path"),
+        # An absolute path outside every root is rejected.
+        (note_resource_uri(str(secret)), "outside"),
         # Any '..' is rejected: through a symlinked dir the lexical parent is
         # not the real one, so the containment check cannot see where it lands.
-        (note_resource_uri("linkdir/../secret.md"), "outside"),
+        (note_resource_uri(f"{note_path(root, 'sub')}/../secret.md"), "outside"),
     ]
     for uri, expected_message in cases:
         with pytest.raises(Exception) as exc_info:
-            read_resource(server, uri, repo=str(repo))
+            read_resource(server, uri, paths=[str(root)])
         assert expected_message in exception_text(exc_info.value)
-def test_requests_require_repo_header_for_tool_and_resource(server):
+def test_requests_require_paths_header_for_tool_and_resource(server):
     res = call_tool(server, "search_knowledge", {"query": "keyword"})
     assert res.is_error
-    assert "X-Recall-Repo" in res.content[0].text
+    assert "X-Recall-Paths" in res.content[0].text
     with pytest.raises(Exception) as exc_info:
         read_resource(server, "recall://notes/index")
-    assert "X-Recall-Repo" in exception_text(exc_info.value)
+    assert "X-Recall-Paths" in exception_text(exc_info.value)
+def test_paths_header_must_be_a_json_array_of_existing_dirs(server, tmp_path):
+    root = make_root(tmp_path / "kb", {"n.md": "keyword here\n"})
+    for bad_header in ["not json", "[]", json.dumps([str(root / "missing")])]:
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(
+                _run_client(
+                    server,
+                    lambda client: client.read_resource("recall://notes/index"),
+                    {"X-Recall-Paths": bad_header},
+                )
+            )
+        assert "X-Recall-Paths" in exception_text(exc_info.value)
 def test_token_auth_for_tool_and_resource(token_server, tmp_path):
-    repo = make_repo(tmp_path / "repo", {"n.md": "token protected keyword\n"})
+    root = make_root(tmp_path / "kb", {"n.md": "token protected keyword\n"})
     no_token = call_tool(
         token_server,
         "search_knowledge",
         {"query": "keyword"},
-        repo=str(repo),
+        paths=[str(root)],
     )
     assert no_token.is_error
     assert "X-Recall-Token" in no_token.content[0].text
@@ -230,7 +284,7 @@ def test_token_auth_for_tool_and_resource(token_server, tmp_path):
         token_server,
         "search_knowledge",
         {"query": "keyword"},
-        repo=str(repo),
+        paths=[str(root)],
         token="nope",
     )
     assert wrong_token.is_error
@@ -238,77 +292,77 @@ def test_token_auth_for_tool_and_resource(token_server, tmp_path):
         token_server,
         "search_knowledge",
         {"query": "keyword"},
-        repo=str(repo),
+        paths=[str(root)],
         token="s3cr3t",
     )
     assert not good.is_error
     assert [match["path"] for match in good.structured_content["result"]] == [
-        note_path(repo, "n.md")
+        note_path(root, "n.md")
     ]
     with pytest.raises(Exception) as exc_info:
-        read_resource(token_server, "recall://notes/index", repo=str(repo))
+        read_resource(token_server, "recall://notes/index", paths=[str(root)])
     assert "X-Recall-Token" in exception_text(exc_info.value)
     with pytest.raises(Exception) as exc_info:
         read_resource(
             token_server,
-            note_resource_uri("n.md"),
-            repo=str(repo),
+            note_resource_uri(note_path(root, "n.md")),
+            paths=[str(root)],
             token="nope",
         )
     assert "X-Recall-Token" in exception_text(exc_info.value)
     index = read_resource(
         token_server,
         "recall://notes/index",
-        repo=str(repo),
+        paths=[str(root)],
         token="s3cr3t",
     )
     assert json.loads(index.contents[0].text) == [
         {
-            "path": note_path(repo, "n.md"),
+            "path": note_path(root, "n.md"),
             "relative_path": "n.md",
-            "resource_uri": note_resource_uri("n.md"),
+            "resource_uri": note_resource_uri(note_path(root, "n.md")),
         }
     ]
     note = read_resource(
         token_server,
-        note_resource_uri("n.md"),
-        repo=str(repo),
+        note_resource_uri(note_path(root, "n.md")),
+        paths=[str(root)],
         token="s3cr3t",
     )
     assert note.contents[0].text == "token protected keyword\n"
-def test_note_symlinked_outside_src_is_searched_indexed_and_read(server, tmp_path):
-    # A symlink under src/ is a note its owner mounted: search, index and read
+def test_note_symlinked_outside_root_is_searched_indexed_and_read(server, tmp_path):
+    # A symlink under a root is a note its owner mounted: search, index and read
     # all serve it. note_path() cannot be used for it — it resolves symlinks,
     # while the server reports the path the note was reached by.
-    repo = make_repo(tmp_path / "repo", {"safe.md": "inside keyword\n"})
+    root = make_root(tmp_path / "kb", {"safe.md": "inside keyword\n"})
     outside = tmp_path / "outside.md"
     outside.write_text("outside keyword\n")
-    os.symlink(outside, repo / "src" / "external.md")
-    external_path = str((repo / "src").resolve() / "external.md")
+    os.symlink(outside, root / "external.md")
+    external_path = str(root.resolve() / "external.md")
     search = call_tool(
         server,
         "search_knowledge",
         {"query": "outside"},
-        repo=str(repo),
+        paths=[str(root)],
     )
     assert not search.is_error
     assert [match["path"] for match in search.structured_content["result"]] == [
         external_path
     ]
-    index = read_resource(server, "recall://notes/index", repo=str(repo))
+    index = read_resource(server, "recall://notes/index", paths=[str(root)])
     assert json.loads(index.contents[0].text) == [
         {
             "path": external_path,
             "relative_path": "external.md",
-            "resource_uri": note_resource_uri("external.md"),
+            "resource_uri": note_resource_uri(external_path),
         },
         {
-            "path": note_path(repo, "safe.md"),
+            "path": note_path(root, "safe.md"),
             "relative_path": "safe.md",
-            "resource_uri": note_resource_uri("safe.md"),
+            "resource_uri": note_resource_uri(note_path(root, "safe.md")),
         },
     ]
     note = read_resource(
-        server, note_resource_uri("external.md"), repo=str(repo)
+        server, note_resource_uri(external_path), paths=[str(root)]
     )
     assert note.contents[0].text == "outside keyword\n"

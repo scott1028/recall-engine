@@ -1,16 +1,18 @@
-"""Machine-wide MCP server exposing knowledge repos over streamable HTTP.
+"""Machine-wide MCP server exposing knowledge paths over streamable HTTP.
 
-A single server serves many knowledge repos. Each client connection names its
-target repo in the ``X-Recall-Repo`` request header (an absolute path), and may
-carry an auth token in ``X-Recall-Token``. Notes live under ``<repo>/src/**/*.md``.
+A single server serves many wrap sessions. Each client connection names its
+knowledge roots in the ``X-Recall-Paths`` request header (a JSON array of
+absolute directory paths), and may carry an auth token in ``X-Recall-Token``.
+Notes live under ``<root>/**/*.md`` for each root.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -35,7 +37,8 @@ NOTES_INDEX_RESOURCE = "recall://notes/index"
 ENCODED_NOTE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Lists never vary per request, so clients may cache and share them. Reads keep
-# the SDK default (ttlMs=0, private): notes change on disk and depend on the repo.
+# the SDK default (ttlMs=0, private): notes change on disk and depend on the
+# caller's knowledge paths.
 LIST_CACHE_HINT = CacheHint(ttl_ms=3_600_000, scope="public")
 CACHE_HINTS = {
     "tools/list": LIST_CACHE_HINT,
@@ -60,9 +63,9 @@ async def _publish_request_headers(
         _request_headers.reset(token)
 
 
-def encode_note_resource_path(relative_path: str) -> str:
-    """Encode a repo-relative note path for a single URI template segment."""
-    return base64.urlsafe_b64encode(relative_path.encode()).decode().rstrip("=")
+def encode_note_resource_path(absolute_path: str) -> str:
+    """Encode an absolute note path for a single URI template segment."""
+    return base64.urlsafe_b64encode(absolute_path.encode()).decode().rstrip("=")
 
 
 def decode_note_resource_path(encoded_path: str) -> str:
@@ -74,14 +77,14 @@ def decode_note_resource_path(encoded_path: str) -> str:
     except (binascii.Error, ValueError) as exc:
         raise ValueError(f"invalid encoded note path: {encoded_path}") from exc
     try:
-        relative_path = decoded.decode()
+        absolute_path = decoded.decode()
     except UnicodeDecodeError as exc:
         raise ValueError(f"invalid encoded note path: {encoded_path}") from exc
-    if not relative_path or "\x00" in relative_path:
+    if not absolute_path or "\x00" in absolute_path:
         raise ValueError(f"invalid encoded note path: {encoded_path}")
-    if encode_note_resource_path(relative_path) != encoded_path:
+    if encode_note_resource_path(absolute_path) != encoded_path:
         raise ValueError(f"invalid encoded note path: {encoded_path}")
-    return relative_path
+    return absolute_path
 
 
 def create_server(token: str | None = None) -> MCPServer:
@@ -98,68 +101,91 @@ def create_server(token: str | None = None) -> MCPServer:
         middleware=[_publish_request_headers],
     )
 
-    def resolve_repo() -> Path:
-        """Resolve and authorize the target repo from the request headers.
+    def resolve_roots() -> list[Path]:
+        """Resolve and authorize the knowledge roots from the request headers.
 
         Raises ResourceError: the SDK passes its message on from resources and,
         as an is_error result, from tools.
         """
         headers = _request_headers.get() or {}
-        repo_header = headers.get("x-recall-repo")
-        if not repo_header:
-            raise ResourceError("missing X-Recall-Repo header")
-        repo = Path(repo_header).resolve()
-        if not repo.is_dir() or not (repo / "src").is_dir():
+        paths_header = headers.get("x-recall-paths")
+        if not paths_header:
+            raise ResourceError("missing X-Recall-Paths header")
+        try:
+            raw_paths = json.loads(paths_header)
+        except ValueError:
+            raw_paths = None
+        if not isinstance(raw_paths, list) or not raw_paths or not all(
+            isinstance(raw, str) and raw for raw in raw_paths
+        ):
             raise ResourceError(
-                f"X-Recall-Repo does not point to a knowledge repo with a "
-                f"src/ directory: {repo_header}"
+                f"X-Recall-Paths must be a non-empty JSON array of directory "
+                f"paths: {paths_header}"
             )
+        roots = []
+        for raw in raw_paths:
+            root = Path(raw).expanduser().resolve()
+            if not root.is_dir():
+                raise ResourceError(
+                    f"X-Recall-Paths entry is not an existing directory: {raw}"
+                )
+            roots.append(root)
         if token is not None and headers.get("x-recall-token") != token:
             raise ResourceError("invalid or missing X-Recall-Token")
-        return repo
+        return roots
 
-    def resolve_note(src: Path, path: str) -> Path:
-        """Resolve a note path and keep the request inside <repo>/src.
+    def resolve_note(roots: Sequence[Path], path: str) -> Path:
+        """Resolve an absolute note path and keep the request inside a root.
 
-        Lexical, not realpath-based: a symlink under src/ is a note even when it
-        points outside src/, so only '..' escapes and paths outside src/ are
-        rejected — see search.is_note_inside. '..' is rejected outright because
-        a symlinked dir makes the lexical parent differ from the real one.
+        Lexical, not realpath-based: a symlink under a root/ is a note even when
+        it points outside the root/, so only '..' escapes and paths outside every
+        root are rejected — see search.is_note_inside. '..' is rejected outright
+        because a symlinked dir makes the lexical parent differ from the real one.
         """
         candidate = Path(path)
-        note = candidate if candidate.is_absolute() else src / candidate
-        if ".." in note.parts or not search.is_note_inside(src, note):
-            raise ResourceError(f"path is outside the knowledge repo src/ directory: {path}")
-        if not note.is_file():
+        if ".." in candidate.parts or not search.is_note_inside_roots(roots, candidate):
+            raise ResourceError(f"path is outside the knowledge paths: {path}")
+        if not candidate.is_file():
             raise ResourceNotFoundError(f"note not found: {path}")
-        return note
+        return candidate
 
-    def note_resource_uri(src: Path, note: Path) -> str:
-        relative_path = note.relative_to(src).as_posix()
-        return f"recall://note/{encode_note_resource_path(relative_path)}"
+    def note_resource_uri(note: Path) -> str:
+        # Encode the absolute path so notes with the same path under different
+        # roots cannot collide.
+        return f"recall://note/{encode_note_resource_path(note.as_posix())}"
 
-    def note_index_entry(src: Path, note: Path) -> dict[str, str]:
+    def note_relative_path(roots: Sequence[Path], note: Path) -> str:
+        """Path of the note relative to its root; the deepest root wins when
+        roots nest."""
+        containing = [root for root in roots if search.is_note_inside(root, note)]
+        if not containing:
+            return note.as_posix()
+        root = max(containing, key=lambda root: len(str(root)))
+        return note.relative_to(root).as_posix()
+
+    def note_index_entry(roots: Sequence[Path], note: Path) -> dict[str, str]:
         return {
             "path": str(note),
-            "relative_path": note.relative_to(src).as_posix(),
-            "resource_uri": note_resource_uri(src, note),
+            "relative_path": note_relative_path(roots, note),
+            "resource_uri": note_resource_uri(note),
         }
 
     @mcp.tool()
     def search_knowledge(query: str) -> list[dict]:
-        """Case-insensitive substring search across <repo>/src/**/*.md.
+        """Case-insensitive substring search across <path>/**/*.md for every
+        configured knowledge path.
 
         Runs ugrep when it is on PATH; falls back to a built-in scan otherwise.
         """
-        src = (resolve_repo() / "src").resolve()
+        roots = resolve_roots()
         return [
             {
                 "path": str(note),
                 "line": lineno,
                 "snippet": line.strip(),
-                "resource_uri": note_resource_uri(src, note),
+                "resource_uri": note_resource_uri(note),
             }
-            for note, lineno, line in search.search_notes(src, query, MAX_MATCHES)
+            for note, lineno, line in search.search_notes(roots, query, MAX_MATCHES)
         ]
 
     # Add list/read tool adapters only if a supported client cannot use MCP resources.
@@ -171,28 +197,25 @@ def create_server(token: str | None = None) -> MCPServer:
         mime_type="application/json",
     )
     def notes_index() -> list[dict[str, str]]:
-        """List Markdown notes in the selected recall-engine knowledge repo."""
-        src = (resolve_repo() / "src").resolve()
-        return [
-            note_index_entry(src, note)
-            for note in search.iter_note_paths(src)
-        ]
+        """List Markdown notes in the selected recall-engine knowledge paths."""
+        roots = resolve_roots()
+        return [note_index_entry(roots, note) for note in search.iter_note_paths(roots)]
 
     @mcp.resource(
         NOTE_RESOURCE_TEMPLATE,
         name="note",
         title="Recall Engine Note",
-        description="Read one Markdown note from the selected recall-engine knowledge repo.",
+        description="Read one Markdown note from the selected recall-engine knowledge paths.",
         mime_type="text/markdown",
     )
     def note(encoded_path: str) -> str:
-        """Read one Markdown note from the selected recall-engine knowledge repo."""
-        src = (resolve_repo() / "src").resolve()
+        """Read one Markdown note from the selected recall-engine knowledge paths."""
+        roots = resolve_roots()
         try:
             note_path = decode_note_resource_path(encoded_path)
         except ValueError as exc:
             raise ResourceError(str(exc)) from exc
-        return resolve_note(src, note_path).read_text(encoding="utf-8", errors="replace")
+        return resolve_note(roots, note_path).read_text(encoding="utf-8", errors="replace")
 
     return mcp
 

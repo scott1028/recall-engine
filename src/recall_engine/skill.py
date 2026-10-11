@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -83,22 +84,24 @@ def _is_same_skill_path(path: Path, skill_dir: Path) -> bool:
     return path.parent.resolve(strict=False) == skill_dir.parent.resolve(strict=False)
 
 
-def _assert_same_repo(record: dict, repo_path: Path) -> None:
-    """Refuse to attach when the live session points at a different repo."""
-    recorded = record.get("repo_path")
-    if recorded is not None and recorded != str(repo_path):
+def _assert_same_knowledge_paths(
+    record: dict, knowledge_paths: Sequence[Path]
+) -> None:
+    """Refuse to attach when the live session points at different paths."""
+    recorded = record.get("knowledge_paths")
+    if recorded is not None and recorded != [str(path) for path in knowledge_paths]:
         raise SkillError(
-            "another wrap session is active in this directory with a different "
-            "knowledge repo; refusing to attach. Run "
+            "another wrap session is active in this directory with different "
+            "knowledge paths; refusing to attach. Run "
             "'recall-engine unwrap' if that session is gone."
         )
 
 
-def detect_active_repo() -> Path | None:
-    """Knowledge repo of a live wrap session in this dir, or None.
+def detect_active_knowledge_paths() -> list[Path] | None:
+    """Knowledge paths of a live wrap session in this dir, or None.
 
-    Lets a second wrap in the same project inherit the running session's repo
-    without re-specifying --local-knowledge-path. Best-effort read (marker writes
+    Lets a second wrap in the same project inherit the running session's paths
+    without re-specifying --knowledge-path. Best-effort read (marker writes
     are atomic); inject_skill re-validates liveness under the lock.
     """
     skill_dir, marker, _ = _paths()
@@ -111,17 +114,17 @@ def detect_active_repo() -> Path | None:
     live = any(_is_pid_alive(p) for p in _marker_pids(record))
     if not live or not (skill_dir / "SKILL.md").exists():
         return None
-    repo_path = record.get("repo_path")
-    return Path(repo_path) if repo_path else None
+    paths = record.get("knowledge_paths")
+    return [Path(path) for path in paths] if paths else None
 
 
-def inject_skill(repo_path: Path) -> None:
+def inject_skill(knowledge_paths: Sequence[Path]) -> None:
     """Write the rendered skill into the project; backup any pre-existing skill."""
     with _skills_lock():
-        _inject_locked(repo_path)
+        _inject_locked(knowledge_paths)
 
 
-def _inject_locked(repo_path: Path) -> None:
+def _inject_locked(knowledge_paths: Sequence[Path]) -> None:
     """Inject logic; assumes the skills lock is already held."""
     skill_dir, marker, backup = _paths()
 
@@ -133,10 +136,12 @@ def _inject_locked(repo_path: Path) -> None:
         live = [p for p in _marker_pids(record) if _is_pid_alive(p)]
         if live and (skill_dir / "SKILL.md").exists():
             # A live session already set up the skill here: attach to it.
-            _assert_same_repo(record, repo_path)
+            _assert_same_knowledge_paths(record, knowledge_paths)
             record["pids"] = sorted(set(live) | {os.getpid()})
             record.pop("pid", None)  # migrate off the legacy single-pid field
-            record.setdefault("repo_path", str(repo_path))  # backfill legacy markers
+            record.setdefault(
+                "knowledge_paths", [str(path) for path in knowledge_paths]
+            )  # backfill legacy markers
             _write_marker(marker, record)
             return
         # No live owner (all dead) or broken state: clean up, then re-inject.
@@ -158,7 +163,7 @@ def _inject_locked(repo_path: Path) -> None:
         skill_dir.rename(backup)
 
     # The skill is static: it points at the recall-engine MCP server's tools,
-    # which read the knowledge repo directly (no in-project link needed).
+    # which read the knowledge paths directly (no in-project link needed).
     template = render_template("SKILL.md.j2")
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(template)
@@ -191,7 +196,7 @@ def _inject_locked(repo_path: Path) -> None:
         marker,
         {
             "pids": [os.getpid()],
-            "repo_path": str(repo_path),
+            "knowledge_paths": [str(path) for path in knowledge_paths],
             "backup": str(backup) if backup.exists() else None,
             "links": links,
             "injected_at": datetime.now(timezone.utc).isoformat(),

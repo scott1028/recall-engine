@@ -1,4 +1,4 @@
-"""Case-insensitive substring search over a repo's Markdown notes.
+"""Case-insensitive substring search over Markdown notes in knowledge roots.
 
 ``ugrep`` does the search when it is on PATH; otherwise a built-in Python scan
 reads the notes directly. Both paths return the same matches in the same order
@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 UGREP = "ugrep"
 UGREP_INSTALL_HINT = "install it with `sudo apt install ugrep` or `brew install ugrep`"
-# ugrep may sit on a slow/large repo; never hang the MCP request forever.
+# ugrep may sit on a slow/large root; never hang the MCP request forever.
 UGREP_TIMEOUT_SECONDS = 30
 # One match per 3 output lines: path, line number, whole matching line. Parsing
 # by line (not by a ':' separator) keeps paths containing ':' unambiguous.
@@ -27,58 +28,79 @@ def ugrep_path() -> str | None:
     return shutil.which(UGREP)
 
 
-def is_note_inside(src: Path, note: Path) -> bool:
-    """True when the note entry itself lives under src, wherever it points.
+def is_note_inside(root: Path, note: Path) -> bool:
+    """True when the note entry itself lives under root, wherever it points.
 
     Containment is judged by the location of the entry, not by the target of a
-    symlink: a symlink placed under src/ is a note its owner deliberately
-    mounted, even when it points outside src/. Callers must reject '..' parts
+    symlink: a symlink placed under root/ is a note its owner deliberately
+    mounted, even when it points outside root/. Callers must reject '..' parts
     first — a lexical check cannot see through a symlinked dir.
     """
-    return src in note.parents
+    return root in note.parents
 
 
-def iter_note_paths(src: Path) -> list[Path]:
-    """List *.md notes under src, following symlinks to files and dirs.
+def is_note_inside_roots(roots: Sequence[Path], note: Path) -> bool:
+    """True when the note lives under any of the knowledge roots."""
+    return any(is_note_inside(root, note) for root in roots)
 
-    A symlink under src/ is a note (or a dir of notes) even when it points
-    outside src/ — that is how an external note is mounted into the repo.
+
+def iter_note_paths(roots: Sequence[Path]) -> list[Path]:
+    """List *.md notes under any root, following symlinks to files and dirs.
+
+    A symlink under a root/ is a note (or a dir of notes) even when it points
+    outside root/ — that is how an external note is mounted into a root.
     Hidden notes (a dot-prefixed file or parent dir) are skipped: ugrep does not
     recurse into them either, and both backends must see the same notes. A
     symlink back to an ancestor is skipped, so a loop cannot recurse forever.
+    Nested roots reach the same note twice, so notes are deduplicated by path.
     """
-    notes: list[Path] = []
-    # (dir to visit, realpaths of its ancestors) — a dir whose realpath is
-    # already an ancestor closes a loop. Not a global visited set: that would
-    # hide the real notes behind a non-looping alias like src/link -> src/sub.
-    stack = [(src, frozenset({src.resolve()}))]
-    while stack:
-        directory, ancestors = stack.pop()
-        for entry in directory.iterdir():
-            if entry.name.startswith("."):
-                continue
-            if entry.is_dir():  # follows symlinked dirs
-                real = entry.resolve()
-                if real in ancestors:
+    notes: set[Path] = set()
+    for root in roots:
+        # (dir to visit, realpaths of its ancestors) — a dir whose realpath is
+        # already an ancestor closes a loop. Not a global visited set: that
+        # would hide the real notes behind a non-looping alias like
+        # root/link -> root/sub.
+        stack = [(root, frozenset({root.resolve()}))]
+        while stack:
+            directory, ancestors = stack.pop()
+            for entry in directory.iterdir():
+                if entry.name.startswith("."):
                     continue
-                stack.append((entry, ancestors | {real}))
-            elif entry.is_file() and entry.name.endswith(".md"):
-                notes.append(entry)
+                if entry.is_dir():  # follows symlinked dirs
+                    real = entry.resolve()
+                    if real in ancestors:
+                        continue
+                    stack.append((entry, ancestors | {real}))
+                elif entry.is_file() and entry.name.endswith(".md"):
+                    notes.add(entry)
     return sorted(notes)
 
 
-def search_notes(src: Path, query: str, max_matches: int) -> list[tuple[Path, int, str]]:
+def search_notes(
+    roots: Sequence[Path], query: str, max_matches: int
+) -> list[tuple[Path, int, str]]:
     """Return (note, line number, matching line) for each hit, capped at max_matches."""
     ugrep = ugrep_path()
     if ugrep is not None:
-        hits = _ugrep_notes(ugrep, src, query, max_matches)
+        hits = _ugrep_notes(ugrep, roots, query, max_matches)
         if hits is not None:
             return hits
-    return _scan_notes(src, query, max_matches)
+    return _scan_notes(roots, query, max_matches)
+
+
+def _finalize_hits(
+    hits: list[tuple[Path, int, str]]
+) -> list[tuple[Path, int, str]]:
+    """Drop duplicate (note, line) hits (nested roots) and order by (path, line)."""
+    unique: dict[tuple[Path, int], tuple[Path, int, str]] = {}
+    for hit in hits:
+        unique.setdefault((hit[0], hit[1]), hit)
+    # Recursive output order is not path-sorted; match the scan's order.
+    return sorted(unique.values(), key=lambda hit: (hit[0], hit[1]))
 
 
 def _ugrep_notes(
-    ugrep: str, src: Path, query: str, max_matches: int
+    ugrep: str, roots: Sequence[Path], query: str, max_matches: int
 ) -> list[tuple[Path, int, str]] | None:
     """Search with ugrep; return None when it cannot run, so the caller scans.
 
@@ -102,7 +124,7 @@ def _ugrep_notes(
                 f"--format={UGREP_FORMAT}",
                 "-e",
                 query,
-                str(src),
+                *(str(root) for root in roots),
             ],
             capture_output=True,
             text=True,
@@ -120,21 +142,26 @@ def _ugrep_notes(
     for i in range(0, len(lines) - 2, 3):
         path, lineno, line = lines[i], lines[i + 1], lines[i + 2]
         note = Path(path)
-        # ugrep only walks below src, so this holds; keep it anyway, so both
-        # backends answer to the same boundary rule.
-        if not is_note_inside(src, note):
+        # ugrep only walks below the roots, so this holds; keep it anyway, so
+        # both backends answer to the same boundary rule.
+        if not is_note_inside_roots(roots, note):
             continue
         hits.append((note, int(lineno), line))
-    # ugrep's recursive output order is not path-sorted; match the scan's order.
-    hits.sort(key=lambda hit: (hit[0], hit[1]))
-    return hits[:max_matches]
+    return _finalize_hits(hits)[:max_matches]
 
 
-def _scan_notes(src: Path, query: str, max_matches: int) -> list[tuple[Path, int, str]]:
-    """Fallback: read every note and compare line by line."""
+def _scan_notes(
+    roots: Sequence[Path], query: str, max_matches: int
+) -> list[tuple[Path, int, str]]:
+    """Fallback: read notes and compare line by line, stopping at the cap.
+
+    iter_note_paths returns sorted, deduplicated notes, so hits are already in
+    (path, line) order and no (note, line) can repeat — the scan can return as
+    soon as max_matches is reached, never reading notes past the cap.
+    """
     needle = query.lower()
     hits: list[tuple[Path, int, str]] = []
-    for note in iter_note_paths(src):
+    for note in iter_note_paths(roots):
         content = note.read_text(encoding="utf-8", errors="replace")
         for lineno, line in enumerate(content.splitlines(), start=1):
             if needle in line.lower():

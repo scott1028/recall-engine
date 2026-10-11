@@ -37,7 +37,6 @@ class ServerInfo:
     port: int
     token: str
     pid: int
-    repo_first: bool = False
 
 
 @dataclass(frozen=True)
@@ -58,11 +57,6 @@ def _lock_path() -> Path:
 
 def _log_path() -> Path:
     return Path(tempfile.gettempdir()) / f"recall-engine-mcp-{os.getuid()}.log"
-
-
-def log_path() -> Path:
-    """Public accessor for the shared server log; the background sync writes here."""
-    return _log_path()
 
 
 def _read_state() -> dict | None:
@@ -157,43 +151,19 @@ def server_status() -> ServerStatus | None:
     )
 
 
-def _register_repo_owner(record: dict, repo: Path | None) -> bool:
-    """Add this pid to `repo`'s owner list; return True if it's the first live one.
-
-    Dead owner pids are pruned first, so a repo whose sessions all exited counts
-    as first again on the next wrap.
-    """
-    if repo is None:
-        return False
-    repo_owners = record.setdefault("repo_owners", {})
-    key = str(repo)
-    live = [p for p in repo_owners.get(key, []) if is_pid_alive(p)]
-    repo_first = not live
-    if os.getpid() not in live:
-        live.append(os.getpid())
-    repo_owners[key] = live
-    return repo_first
-
-
-def ensure_server(repo: Path | None = None, token: str | None = None) -> ServerInfo:
-    """Reuse the running server or spawn one; register this process as an owner.
-
-    When `repo` is given, per-repo owners are tracked too, so the first wrap to
-    bring a repo online (no live owner yet) is reported via `ServerInfo.repo_first`.
-    """
+def ensure_server(token: str | None = None) -> ServerInfo:
+    """Reuse the running server or spawn one; register this process as an owner."""
     with file_lock(_lock_path()):
         record = _read_state()
         if record and _server_alive(record):
             owners = sorted(set(record.get("owners", [])) | {os.getpid()})
             record["owners"] = owners
-            repo_first = _register_repo_owner(record, repo)
             atomic_write_json(_state_path(), record)
             return ServerInfo(
                 url=record["url"],
                 port=record["port"],
                 token=record["token"],
                 pid=record["pid"],
-                repo_first=repo_first,
             )
 
         # No live/healthy server: spawn a fresh one.
@@ -210,14 +180,10 @@ def ensure_server(repo: Path | None = None, token: str | None = None) -> ServerI
             "url": _url(port),
             "token": token,
             "owners": [os.getpid()],
-            "repo_owners": {},
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
-        repo_first = _register_repo_owner(record, repo)
         atomic_write_json(_state_path(), record)
-        return ServerInfo(
-            url=record["url"], port=port, token=token, pid=pid, repo_first=repo_first
-        )
+        return ServerInfo(url=record["url"], port=port, token=token, pid=pid)
 
 
 def release_server(owner_pid: int | None = None, *, force: bool = False) -> bool:
@@ -229,17 +195,6 @@ def release_server(owner_pid: int | None = None, *, force: bool = False) -> bool
         record = _read_state()
         if record is None:
             return False
-
-        # Drop this owner from per-repo tracking (pruning dead pids too), so a
-        # repo whose sessions all exit re-triggers the first-wrap sync next time.
-        repo_owners = record.get("repo_owners", {})
-        for key in list(repo_owners):
-            live = [p for p in repo_owners[key] if is_pid_alive(p) and p != owner_pid]
-            if live:
-                repo_owners[key] = live
-            else:
-                del repo_owners[key]
-        record["repo_owners"] = repo_owners
 
         if not force:
             remaining = [

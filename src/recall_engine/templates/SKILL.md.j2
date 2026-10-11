@@ -11,14 +11,14 @@ this tool and these resources:
 - `search_knowledge(query)` — search the knowledge base and return matching
   note paths with snippets and a `resource_uri` for each matching note.
 - `recall://notes/index` — exact resource that lists Markdown notes in the
-  selected knowledge repo.
+  selected knowledge paths.
 - `recall://note/{encoded_path}` — resource template that reads one Markdown
   note. Use the `resource_uri` returned by `search_knowledge`; do not construct
   encoded paths by hand unless necessary.
 
 Treat the knowledge base as the authoritative record of past processing, notes,
 decisions, and prior experience handling similar problems. The server reads the
-knowledge repo directly, so you never need filesystem access to it.
+knowledge paths directly, so you never need filesystem access to them.
 
 ## Before replying
 
@@ -63,4 +63,5 @@ When in doubt, search.
 
 ## Constraints
 
-- The tool and resources are read-only. Do not attempt to modify the knowledge repo.
+- The tool and resources are read-only. Do not attempt to modify the knowledge
+  paths.

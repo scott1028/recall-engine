@@ -87,7 +87,7 @@ def test_json_config_shapes_matrix(project):
     ]
     for agent, relative_path, servers_path, expected_entry in cases:
         repo = project / f"repo-{agent}"
-        inject_mcp_config(agent, repo, URL, token=TOKEN)
+        inject_mcp_config(agent, [repo], URL, token=TOKEN)
         path = config_path(project, agent)
         assert path == project / relative_path
         servers = json.loads(path.read_text())
@@ -97,7 +97,7 @@ def test_json_config_shapes_matrix(project):
         assert entry == {
             **expected_entry,
             "headers": {
-                "X-Recall-Repo": str(repo),
+                "X-Recall-Paths": json.dumps([str(repo)]),
                 "X-Recall-Token": TOKEN,
             },
         }
@@ -107,14 +107,14 @@ def test_json_config_shapes_matrix(project):
 # --- 2. TOML round-trip (codex) ---------------------------------------------
 def test_codex_toml_roundtrip(project):
     repo = project / "repo"
-    inject_mcp_config("codex", repo, URL, token=TOKEN)
+    inject_mcp_config("codex", [repo], URL, token=TOKEN)
     path = config_path(project, "codex")
     assert path == project / ".codex" / "config.toml"
     data = tomllib.loads(path.read_text())
     server = data["mcp_servers"]["recall-engine"]
     assert server["url"] == URL
     assert server["http_headers"] == {
-        "X-Recall-Repo": str(repo),
+        "X-Recall-Paths": json.dumps([str(repo)]),
         "X-Recall-Token": TOKEN,
     }
     assert restore_mcp_config(owner_pid=os.getpid()) is True
@@ -125,7 +125,7 @@ def test_codex_toml_preserves_user_content(project):
     path.parent.mkdir(parents=True)
     original = '# my codex config\nmodel = "gpt-5"\n\n[tui]\ntheme = "dark"\n'
     path.write_text(original)
-    inject_mcp_config("codex", repo, URL)
+    inject_mcp_config("codex", [repo], URL)
     data = tomllib.loads(path.read_text())
     # User content preserved alongside our server table.
     assert data["model"] == "gpt-5"
@@ -139,7 +139,7 @@ def test_preexisting_json_backed_up_and_restored(project):
     path = config_path(project, "claude")
     original = json.dumps({"mcpServers": {"other": {"url": "http://other"}}}, indent=2)
     path.write_text(original)
-    inject_mcp_config("claude", repo, URL, token=TOKEN)
+    inject_mcp_config("claude", [repo], URL, token=TOKEN)
     data = json.loads(path.read_text())
     # Our entry added alongside the user's own server.
     assert data["mcpServers"]["other"] == {"url": "http://other"}
@@ -157,16 +157,16 @@ def test_opencode_entry_nests_under_mcp_servers_beside_user_entries(project):
         indent=2,
     )
     path.write_text(original)
-    inject_mcp_config("opencode", repo, URL, token=TOKEN)
+    inject_mcp_config("opencode", [repo], URL, token=TOKEN)
     data = json.loads(path.read_text())
     assert data["mcp"]["other"]["url"] == "http://other"
     assert data["mcp"]["servers"]["recall-engine"]["url"] == URL
     assert restore_mcp_config(owner_pid=os.getpid()) is True
     assert path.read_text() == original  # byte-identical restore
 # --- 4. token=None omits X-Recall-Token -------------------------------------
-def test_attach_same_repo_reasserts_entry_no_duplicate_backup(project):
+def test_attach_same_paths_reasserts_entry_no_duplicate_backup(project):
     repo = project / "repo"
-    inject_mcp_config("pi", repo, URL, token=TOKEN)  # first owner
+    inject_mcp_config("pi", [repo], URL, token=TOKEN)  # first owner
     marker = marker_path(project)
     path = config_path(project, "pi")
     backup = Path(str(path) + ".recall-engine-mcp-backup")
@@ -180,7 +180,7 @@ def test_attach_same_repo_reasserts_entry_no_duplicate_backup(project):
         record = json.loads(marker.read_text())
         record["pids"] = [other.pid]
         marker.write_text(json.dumps(record))
-        inject_mcp_config("pi", repo, URL, token=TOKEN)  # attach + re-assert
+        inject_mcp_config("pi", [repo], URL, token=TOKEN)  # attach + re-assert
         record = json.loads(marker.read_text())
         pids = record["pids"]
         assert other.pid in pids and os.getpid() in pids
@@ -196,7 +196,7 @@ def test_first_owner_leaving_keeps_config_then_last_restores(project):
     path = config_path(project, "claude")
     original = json.dumps({"mcpServers": {"other": {"url": "http://other"}}}, indent=2)
     path.write_text(original)
-    inject_mcp_config("claude", repo, URL, token=TOKEN)  # backs up user config
+    inject_mcp_config("claude", [repo], URL, token=TOKEN)  # backs up user config
     marker = marker_path(project)
     backup = Path(str(path) + ".recall-engine-mcp-backup")
     other = live_pid()
@@ -220,7 +220,7 @@ def test_first_owner_leaving_keeps_config_then_last_restores(project):
     assert not backup.exists()
 def test_second_agent_attaches_with_its_own_config(project):
     repo = project / "repo"
-    inject_mcp_config("claude", repo, URL, token=TOKEN)  # first owner, claude
+    inject_mcp_config("claude", [repo], URL, token=TOKEN)  # first owner, claude
     marker = marker_path(project)
     other = live_pid()
     try:
@@ -228,7 +228,7 @@ def test_second_agent_attaches_with_its_own_config(project):
         record["pids"] = [other.pid, os.getpid()]
         marker.write_text(json.dumps(record))
         # A second agent (codex) wraps the same dir/repo -> its config is added.
-        inject_mcp_config("codex", repo, URL, token=TOKEN)
+        inject_mcp_config("codex", [repo], URL, token=TOKEN)
         configs = json.loads(marker.read_text())["configs"]
         agents = {c["agent"] for c in configs}
         assert agents == {"claude", "codex"}
@@ -240,9 +240,9 @@ def test_second_agent_attaches_with_its_own_config(project):
     assert restore_mcp_config(force=True) is True
     assert not config_path(project, "claude").exists()
     assert not config_path(project, "codex").exists()
-# --- 6. Different-repo attach refused ----------------------------------------
-def test_attach_refused_when_repo_differs(project):
-    inject_mcp_config("claude", project / "repo-a", URL)
+# --- 6. Different-paths attach refused ---------------------------------------
+def test_attach_refused_when_paths_differ(project):
+    inject_mcp_config("claude", [project / "repo-a"], URL)
     marker = marker_path(project)
     other = live_pid()
     try:
@@ -250,7 +250,7 @@ def test_attach_refused_when_repo_differs(project):
         record["pids"] = [other.pid]
         marker.write_text(json.dumps(record))
         with pytest.raises(McpConfigError, match="different"):
-            inject_mcp_config("claude", project / "repo-b", URL)
+            inject_mcp_config("claude", [project / "repo-b"], URL)
     finally:
         other.terminate()
         other.wait()
@@ -265,7 +265,7 @@ def test_preexisting_jsonc_and_empty_configs_restore(project):
         path = config_path(project, agent)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(original)
-        inject_mcp_config(agent, repo, URL, token=TOKEN)
+        inject_mcp_config(agent, [repo], URL, token=TOKEN)
         data = json.loads(path.read_text())
         if agent == "gemini":
             assert data["theme"] == "dark"
@@ -286,7 +286,7 @@ def test_malformed_json_cases_preserve_file_and_do_not_backup(project):
         path = config_path(project, agent)
         path.write_text(original)
         with pytest.raises(McpConfigError, match=error):
-            inject_mcp_config(agent, repo, URL)
+            inject_mcp_config(agent, [repo], URL)
         assert path.read_text() == original
         assert not marker_path(project).exists()
         assert not Path(str(path) + ".recall-engine-mcp-backup").exists()
@@ -297,18 +297,18 @@ def test_malformed_toml_raises_clean_error_and_preserves_file(project):
     original = 'model = "unterminated\n'
     path.write_text(original)
     with pytest.raises(McpConfigError, match="not valid TOML"):
-        inject_mcp_config("codex", repo, URL)
+        inject_mcp_config("codex", [repo], URL)
     assert path.read_text() == original
     assert not Path(str(path) + ".recall-engine-mcp-backup").exists()
 # --- Misc -------------------------------------------------------------------
 def test_stale_marker_all_dead_reinjected_fresh(project, capsys):
     repo = project / "repo"
-    inject_mcp_config("claude", repo, URL, token=TOKEN)
+    inject_mcp_config("claude", [repo], URL, token=TOKEN)
     marker = marker_path(project)
     record = json.loads(marker.read_text())
     record["pids"] = [dead_pid()]
     marker.write_text(json.dumps(record))
-    inject_mcp_config("claude", repo, URL, token=TOKEN)  # stale -> clean + fresh
+    inject_mcp_config("claude", [repo], URL, token=TOKEN)  # stale -> clean + fresh
     assert "stale wrap session" in capsys.readouterr().err
     assert json.loads(marker.read_text())["pids"] == [os.getpid()]
     entry = json.loads(config_path(project, "claude").read_text())["mcpServers"][

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,23 +13,38 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Settings:
-    repo_path: Path
-    drive_folder: str | None
+    knowledge_paths: tuple[Path, ...]
 
 
 def resolve_settings(
-    local_knowledge_path: str | None = None,
-    remote_knowledge_folder: str | None = None,
-    fallback_repo_path: Path | None = None,
+    knowledge_paths: Sequence[str] | None = None,
+    fallback_paths: Sequence[Path] | None = None,
 ) -> Settings:
-    """Resolve settings, falling back to an active wrap session's repo."""
-    if local_knowledge_path:
-        repo_path = Path(local_knowledge_path).expanduser()
-    elif fallback_repo_path is not None:
-        repo_path = fallback_repo_path
-    else:
+    """Resolve knowledge paths, falling back to an active wrap session's paths.
+
+    Each path is expanded (`~`), must be an existing directory, and is resolved
+    to an absolute path. Duplicates are dropped while the given order is kept.
+    """
+    raw_paths: list[str | Path] = list(knowledge_paths) if knowledge_paths else list(
+        fallback_paths or []
+    )
+    if not raw_paths:
         raise ConfigError(
-            "No knowledge repo configured; pass --local-knowledge-path."
+            "No knowledge paths configured; pass --knowledge-path for each "
+            "knowledge directory."
         )
 
-    return Settings(repo_path=repo_path, drive_folder=remote_knowledge_folder or None)
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for raw in raw_paths:
+        path = Path(raw).expanduser()
+        if not path.is_dir():
+            raise ConfigError(
+                f"--knowledge-path points to a missing directory: {path}"
+            )
+        absolute = path.resolve()
+        if absolute not in seen:
+            seen.add(absolute)
+            resolved.append(absolute)
+
+    return Settings(knowledge_paths=tuple(resolved))

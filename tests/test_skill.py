@@ -8,7 +8,7 @@ import pytest
 
 from recall_engine.skill import (
     SkillError,
-    detect_active_repo,
+    detect_active_knowledge_paths,
     inject_skill,
     restore_skill,
 )
@@ -33,7 +33,7 @@ def dead_pid() -> int:
     return child.pid
 def test_inject_creates_skill_marker_symlinks_and_public_content(project, tmp_path):
     repo = tmp_path / "repo"
-    inject_skill(repo)
+    inject_skill([repo])
     skill_dir, marker, _ = skill_paths(project)
     content = (skill_dir / "SKILL.md").read_text()
     assert content.startswith("---\n")
@@ -58,7 +58,7 @@ def test_inject_creates_skill_marker_symlinks_and_public_content(project, tmp_pa
     record = json.loads(marker.read_text())
     assert record["pids"] == [os.getpid()]
     assert record["backup"] is None
-    assert record["repo_path"] == str(repo)
+    assert record["knowledge_paths"] == [str(repo)]
     assert record["injected_at"]
     for link in link_paths(project):
         assert link.is_symlink()
@@ -69,7 +69,7 @@ def test_inject_skips_agent_dir_that_resolves_to_ssot(project, tmp_path):
     claude_skills = project / ".claude" / "skills"
     claude_skills.parent.mkdir()
     os.symlink(os.path.relpath(project / ".agents" / "skills", claude_skills.parent), claude_skills)
-    inject_skill(tmp_path / "repo")
+    inject_skill([tmp_path / "repo"])
     skill_dir, _, backup = skill_paths(project)
     assert skill_dir.is_dir()
     assert not skill_dir.is_symlink()
@@ -80,7 +80,7 @@ def test_inject_skips_agent_dir_that_resolves_to_ssot(project, tmp_path):
     assert (project / ".pi" / "skills" / "recall-engine").is_symlink()
 def test_restore_with_nothing_then_removes_skill_marker_and_symlinks(project, tmp_path):
     assert restore_skill() is False
-    inject_skill(tmp_path / "repo")
+    inject_skill([tmp_path / "repo"])
     assert restore_skill(owner_pid=os.getpid()) is True
     skill_dir, marker, backup = skill_paths(project)
     assert not skill_dir.exists()
@@ -94,7 +94,7 @@ def test_preexisting_user_skill_backed_up_and_restored(project, tmp_path, capsys
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("user's own skill\n")
     (skill_dir / "extra.txt").write_text("distinctive user file\n")
-    inject_skill(tmp_path / "repo")
+    inject_skill([tmp_path / "repo"])
     assert "moved to backup" in capsys.readouterr().err
     assert (backup / "extra.txt").read_text() == "distinctive user file\n"
     assert "knowledge base" in (skill_dir / "SKILL.md").read_text()
@@ -108,7 +108,7 @@ def test_preexisting_agent_dir_skill_backed_up_and_restored(project, tmp_path, c
     user_skill = project / ".claude" / "skills" / "recall-engine"
     user_skill.mkdir(parents=True)
     (user_skill / "SKILL.md").write_text("user's claude skill\n")
-    inject_skill(tmp_path / "repo")
+    inject_skill([tmp_path / "repo"])
     assert "moved to backup" in capsys.readouterr().err
     assert user_skill.is_symlink()
     assert restore_skill(owner_pid=os.getpid()) is True
@@ -121,7 +121,7 @@ def test_stale_marker_dead_pid_auto_restored(project, tmp_path, capsys):
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({"pid": dead_pid(), "backup": None}))
     repo = tmp_path / "repo"
-    inject_skill(repo)
+    inject_skill([repo])
     assert "stale wrap session" in capsys.readouterr().err
     assert "search_knowledge" in (skill_dir / "SKILL.md").read_text()
     assert json.loads(marker.read_text())["pids"] == [os.getpid()]
@@ -162,24 +162,24 @@ def test_legacy_claude_skills_marker_cleaned(project):
 def live_pid():
     """Spawn a long-lived process; caller must terminate it."""
     return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-def test_live_session_attach_refcount_and_repo_guard(project, tmp_path):
+def test_live_session_attach_refcount_and_paths_guard(project, tmp_path):
     # A pre-existing user skill must survive until the LAST owner leaves.
     skill_dir, marker, backup = skill_paths(project)
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("user's own skill\n")
     repo = tmp_path / "repo-a"
-    inject_skill(repo)  # backs up user skill; pids == [me]
+    inject_skill([repo])  # backs up user skill; pids == [me]
     other = live_pid()
     try:
         record = json.loads(marker.read_text())
         record["pids"] = [other.pid]
         marker.write_text(json.dumps(record))
-        inject_skill(repo)  # same dir, same repo -> attach, no re-inject
+        inject_skill([repo])  # same dir, same paths -> attach, no re-inject
         pids = json.loads(marker.read_text())["pids"]
         assert other.pid in pids and os.getpid() in pids
         assert backup.exists()
         with pytest.raises(SkillError, match="different"):
-            inject_skill(tmp_path / "repo-b")
+            inject_skill([tmp_path / "repo-b"])
         # First owner (us) leaves while `other` is still alive -> keep injection.
         assert restore_skill(owner_pid=os.getpid()) is True
         assert (skill_dir / "SKILL.md").read_text() != "user's own skill\n"
@@ -193,17 +193,17 @@ def test_live_session_attach_refcount_and_repo_guard(project, tmp_path):
     assert (skill_dir / "SKILL.md").read_text() == "user's own skill\n"
     assert not marker.exists()
     assert not backup.exists()
-def test_detect_active_repo_cases(project, tmp_path):
-    assert detect_active_repo() is None
+def test_detect_active_knowledge_paths_cases(project, tmp_path):
+    assert detect_active_knowledge_paths() is None
     repo = tmp_path / "repo"
-    inject_skill(repo)  # our own pid is live, so the session counts as active
-    assert detect_active_repo() == repo
+    inject_skill([repo])  # our own pid is live, so the session counts as active
+    assert detect_active_knowledge_paths() == [repo]
     _, marker, _ = skill_paths(project)
     record = json.loads(marker.read_text())
     record["pids"] = [dead_pid()]
     marker.write_text(json.dumps(record))
-    assert detect_active_repo() is None
+    assert detect_active_knowledge_paths() is None
     skill_dir, marker, _ = skill_paths(project)
-    (skill_dir / "SKILL.md").write_text("live but repo unknown\n")
+    (skill_dir / "SKILL.md").write_text("live but paths unknown\n")
     marker.write_text(json.dumps({"pids": [os.getpid()], "backup": None}))
-    assert detect_active_repo() is None
+    assert detect_active_knowledge_paths() is None

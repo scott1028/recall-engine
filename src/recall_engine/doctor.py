@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 from recall_engine import search
 from recall_engine.agents import AGENTS
-from recall_engine.config import ConfigError, resolve_settings
-from recall_engine.drive import DriveError, build_drive_service, execute
 from recall_engine.mcp_supervisor import server_status
 
 
@@ -19,15 +18,6 @@ def _fail(name: str, detail: str, fix: str) -> None:
     print(f"[fail] {name}: {detail}")
     for line in fix.splitlines():
         print(f"    {line}")
-
-
-def _check_git() -> bool:
-    path = shutil.which("git")
-    if path is None:
-        _fail("git", "not found on PATH", "install git (apt/brew install git)")
-        return False
-    _ok("git", path)
-    return True
 
 
 def _check_agents() -> bool:
@@ -125,61 +115,38 @@ def _report_codex_trust() -> None:
     )
 
 
-def _check_repo_config(local_knowledge_path: str | None) -> bool:
-    try:
-        settings = resolve_settings(local_knowledge_path=local_knowledge_path)
-    except ConfigError as exc:
-        _fail("repo config", "not configured", str(exc))
-        return False
-    _ok("repo config", f"path: {settings.repo_path}")
-    return True
-
-
-def _check_drive_access() -> bool:
-    try:
-        service = build_drive_service()
-        # Trivial call to prove the Drive scope actually works; no folder needed.
-        execute(service.files().list(pageSize=1, fields="files(id)"))
-    except DriveError as exc:
-        _fail("gcloud auth", "Drive access failed", str(exc))
-        return False
-    except Exception as exc:  # noqa: BLE001 - e.g. network down; never show a stack trace
+def _check_knowledge_paths(knowledge_paths: list[str] | None) -> bool:
+    if not knowledge_paths:
         _fail(
-            "gcloud auth",
-            f"Drive API call failed ({type(exc).__name__}: {exc})",
-            "check network connectivity and retry",
+            "knowledge paths",
+            "not configured",
+            "pass --knowledge-path for each existing knowledge directory",
         )
         return False
-    _ok("gcloud auth", "credentials with Drive scope verified")
-    return True
+    passed = True
+    for raw in knowledge_paths:
+        path = Path(raw).expanduser()
+        if path.is_dir():
+            _ok("knowledge path", str(path.resolve()))
+        else:
+            _fail(
+                "knowledge path",
+                f"{path} is not an existing directory",
+                "pass --knowledge-path for each existing knowledge directory",
+            )
+            passed = False
+    return passed
 
 
-def _report_drive_folder(remote_knowledge_folder: str | None) -> None:
-    """Informational only: the folder is needed just for sync."""
-    if remote_knowledge_folder:
-        _ok("drive folder", remote_knowledge_folder)
-    else:
-        print(
-            "[skip] drive folder: --remote-knowledge-folder not passed "
-            "(needed only for sync)"
-        )
-
-
-def run_doctor(
-    local_knowledge_path: str | None = None,
-    remote_knowledge_folder: str | None = None,
-) -> bool:
+def run_doctor(knowledge_paths: list[str] | None = None) -> bool:
     """Run every check; return True only when all required checks pass."""
     results = [
-        _check_git(),
         _check_agents(),
         _check_mcp(),
         _check_mcp_server(),
-        _check_repo_config(local_knowledge_path),
-        _check_drive_access(),
+        _check_knowledge_paths(knowledge_paths),
     ]
     _report_ugrep()
     _report_pi_trust()
     _report_codex_trust()
-    _report_drive_folder(remote_knowledge_folder)
     return all(results)

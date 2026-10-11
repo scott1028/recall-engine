@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -14,13 +13,6 @@ from recall_engine.agents import AGENTS
 from recall_engine.completion import uninstall_completion
 from recall_engine.config import ConfigError, resolve_settings
 from recall_engine.doctor import run_doctor
-from recall_engine.drive import (
-    DriveError,
-    build_drive_service,
-    resolve_folder_id,
-    sync_download,
-    sync_upload,
-)
 from recall_engine.launcher import (
     LauncherError,
     detect_agent,
@@ -35,32 +27,27 @@ from recall_engine.mcp_server import run_server
 from recall_engine.mcp_supervisor import (
     SupervisorError,
     ensure_server,
-    log_path,
     release_server,
 )
-from recall_engine.repo import RepoError, ensure_repo
 from recall_engine.skill import (
     SkillError,
-    detect_active_repo,
+    detect_active_knowledge_paths,
     inject_skill,
     restore_skill,
 )
 
-LOCAL_KNOWLEDGE_PATH_HELP = (
-    "Path to an existing local knowledge repo; its notes live under <path>/src/. "
-    "Optional for a wrap in a directory that already has a running session, where "
-    "the repo is auto-detected."
-)
-REMOTE_KNOWLEDGE_FOLDER_HELP = (
-    "Google Drive folder ID or name (case-sensitive); enables `sync download` / "
-    "`sync upload` and the first-wrap auto-download."
+KNOWLEDGE_PATH_HELP = (
+    "Path to an existing local knowledge directory; its notes are found under "
+    "<path>/**/*.md. Repeat the option for multiple directories. Optional for a "
+    "wrap in a directory that already has a running session, where the paths "
+    "are auto-detected."
 )
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="""Recall Engine: wrap an agent CLI (claude/codex/pi/gemini/opencode/agy) with a knowledge repo and sync it with Google Drive.
+    help="""Recall Engine: wrap an agent CLI (claude/codex/pi/gemini/opencode/agy) with one or more local knowledge directories searched through a shared MCP server.
 
---local-knowledge-path and --remote-knowledge-folder also work on `wrap`, `sync` and `doctor`, where they override the values given here. With `wrap`, pass them before AGENT, since everything after AGENT goes to the agent CLI.
+--knowledge-path also works on `wrap` and `doctor`, where it overrides the values given here. With `wrap`, pass it before AGENT, since everything after AGENT goes to the agent CLI.
 
 Search backend:
 
@@ -84,12 +71,9 @@ def _uninstall_completion_callback(ctx: typer.Context, value: bool) -> bool:
 @app.callback()
 def main(
     ctx: typer.Context,
-    local_knowledge_path: str = typer.Option(
-        None, "--local-knowledge-path", help=LOCAL_KNOWLEDGE_PATH_HELP
-    ),
-    remote_knowledge_folder: str = typer.Option(
-        None, "--remote-knowledge-folder", help=REMOTE_KNOWLEDGE_FOLDER_HELP
-    ),
+    knowledge_path: Annotated[
+        list[str] | None, typer.Option("--knowledge-path", help=KNOWLEDGE_PATH_HELP)
+    ] = None,
     uninstall_completion_flag: bool = typer.Option(
         None,
         "--uninstall-completion",
@@ -99,50 +83,13 @@ def main(
         "PowerShell profiles are left alone).",
     ),
 ) -> None:
-    ctx.obj = {
-        "local_knowledge_path": local_knowledge_path,
-        "remote_knowledge_folder": remote_knowledge_folder,
-    }
+    ctx.obj = {"knowledge_path": knowledge_path}
 
 
-def _resolve_options(
-    ctx: typer.Context, local_knowledge_path: str, remote_knowledge_folder: str
-) -> tuple[str, str]:
+def _resolve_options(ctx: typer.Context, knowledge_path: list[str]) -> list[str]:
     """Command-level options win; fall back to the ones passed before the command."""
     global_options = ctx.obj or {}
-    return (
-        local_knowledge_path or global_options.get("local_knowledge_path"),
-        remote_knowledge_folder or global_options.get("remote_knowledge_folder"),
-    )
-
-
-def _spawn_background_download(repo: Path, drive_folder: str) -> None:
-    """First wrap of a repo: fire-and-forget `sync download` in the background.
-
-    Never waited on, so a slow or failing sync cannot disrupt wrap or the agent;
-    stderr goes to the shared server log instead of interleaving with the TUI.
-    """
-    try:
-        log = open(log_path(), "ab")  # noqa: SIM115 (kept open for the child)
-        subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "recall_engine",
-                "sync",
-                "download",
-                "--local-knowledge-path",
-                str(repo),
-                "--remote-knowledge-folder",
-                drive_folder,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=log,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError:
-        pass  # best-effort: a spawn failure must not disrupt wrap
+    return knowledge_path or global_options.get("knowledge_path") or []
 
 
 @app.command(
@@ -157,22 +104,17 @@ def _spawn_background_download(repo: Path, drive_folder: str) -> None:
 def wrap(
     ctx: typer.Context,
     agent: str,
-    local_knowledge_path: str = typer.Option(
-        None, "--local-knowledge-path", help=LOCAL_KNOWLEDGE_PATH_HELP
-    ),
-    remote_knowledge_folder: str = typer.Option(
-        None, "--remote-knowledge-folder", help=REMOTE_KNOWLEDGE_FOLDER_HELP
-    ),
+    knowledge_path: Annotated[
+        list[str] | None, typer.Option("--knowledge-path", help=KNOWLEDGE_PATH_HELP)
+    ] = None,
 ) -> None:
-    """Prepare the knowledge repo and launch AGENT (claude/codex/pi/gemini/opencode/agy or a wrapper).
+    """Prepare the knowledge paths and launch AGENT (claude/codex/pi/gemini/opencode/agy or a wrapper).
 
     Extra arguments after AGENT are passed straight through to it, so pass these
     options before AGENT.
     """
     agent_args = list(ctx.args)
-    local_knowledge_path, remote_knowledge_folder = _resolve_options(
-        ctx, local_knowledge_path, remote_knowledge_folder
-    )
+    knowledge_path = _resolve_options(ctx, knowledge_path)
     # Known names are trusted as-is; other names must classify as a wrapper
     # of one of the supported agent families.
     family = agent if agent in AGENTS else detect_agent(agent)
@@ -185,22 +127,17 @@ def wrap(
         )
         raise typer.Exit(2)
     try:
-        # A live wrap session in this dir lets a second wrap reuse its repo
-        # without --local-knowledge-path; the option still wins when passed.
+        # A live wrap session in this dir lets a second wrap reuse its paths
+        # without --knowledge-path; the option still wins when passed.
         settings = resolve_settings(
-            local_knowledge_path=local_knowledge_path,
-            remote_knowledge_folder=remote_knowledge_folder,
-            fallback_repo_path=detect_active_repo(),
+            knowledge_paths=knowledge_path,
+            fallback_paths=detect_active_knowledge_paths(),
         )
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
-    try:
-        repo = ensure_repo(settings)
-    except RepoError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(1) from exc
-    typer.echo(f"knowledge repo: {repo}")
+    for path in settings.knowledge_paths:
+        typer.echo(f"knowledge path: {path}")
     # Search works either way; tell the user when it is on the slow path.
     ugrep = search.ugrep_path()
     if ugrep is None:
@@ -217,22 +154,10 @@ def wrap(
     # down in the finally, and each restore is idempotent and safe to call even
     # when its setup step did not run.
     try:
-        inject_skill(repo)
-        server = ensure_server(repo)
-        inject_mcp_config(family, repo, server.url, server.token)
-        # First wrap to bring this repo online pulls the latest notes from Drive.
-        if server.repo_first:
-            if settings.drive_folder:
-                typer.echo(
-                    f"drive sync: downloading '{settings.drive_folder}' into "
-                    f"{repo / 'src'} in the background"
-                )
-                _spawn_background_download(repo, settings.drive_folder)
-            else:
-                typer.echo(
-                    "drive sync: skipped (pass --remote-knowledge-folder to "
-                    "auto-download notes on first wrap)"
-                )
+        knowledge_paths = list(settings.knowledge_paths)
+        inject_skill(knowledge_paths)
+        server = ensure_server()
+        inject_mcp_config(family, knowledge_paths, server.url, server.token)
         typer.echo(f"launching {agent}...")
         # agy only reads the injected .agents/ config when the project dir is in
         # its workspace, so pass `--add-dir <project>` for it.
@@ -242,7 +167,7 @@ def wrap(
             else []
         )
         exit_code = launch_agent(
-            repo,
+            knowledge_paths[0],
             argv=agent_args,
             agent=agent,
             install_hint=AGENTS[family].install_hint,
@@ -274,77 +199,15 @@ def unwrap() -> None:
 
 
 @app.command()
-def sync(
-    ctx: typer.Context,
-    mode: str,
-    local_knowledge_path: str = typer.Option(
-        None, "--local-knowledge-path", help=LOCAL_KNOWLEDGE_PATH_HELP
-    ),
-    remote_knowledge_folder: str = typer.Option(
-        None, "--remote-knowledge-folder", help=REMOTE_KNOWLEDGE_FOLDER_HELP
-    ),
-) -> None:
-    """One-way Drive sync; MODE is 'download' or 'upload'."""
-    if mode not in ("download", "upload"):
-        typer.echo(f"Invalid mode '{mode}'; use 'download' or 'upload'.", err=True)
-        raise typer.Exit(2)
-    local_knowledge_path, remote_knowledge_folder = _resolve_options(
-        ctx, local_knowledge_path, remote_knowledge_folder
-    )
-    try:
-        settings = resolve_settings(
-            local_knowledge_path=local_knowledge_path,
-            remote_knowledge_folder=remote_knowledge_folder,
-        )
-    except ConfigError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(2) from exc
-    if not settings.drive_folder:
-        typer.echo(
-            "No Drive folder configured; pass --remote-knowledge-folder with the "
-            "Drive folder ID or name.",
-            err=True,
-        )
-        raise typer.Exit(2)
-    try:
-        repo = ensure_repo(settings)
-    except RepoError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(1) from exc
-    src_dir = repo / "src"
-    try:
-        typer.echo("drive sync: authenticating")
-        service = build_drive_service()
-        typer.echo(f"drive sync: resolving folder {settings.drive_folder}")
-        folder_id = resolve_folder_id(service, settings.drive_folder)
-        typer.echo(f"drive sync: starting {mode}")
-        if mode == "download":
-            names = sync_download(service, folder_id, src_dir, log=typer.echo)
-        else:
-            names = sync_upload(service, folder_id, src_dir, log=typer.echo)
-    except DriveError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(1) from exc
-    for name in names:
-        typer.echo(name)
-    typer.echo(f"synced {len(names)} file(s) ({mode})")
-
-
-@app.command()
 def doctor(
     ctx: typer.Context,
-    local_knowledge_path: str = typer.Option(
-        None, "--local-knowledge-path", help=LOCAL_KNOWLEDGE_PATH_HELP
-    ),
-    remote_knowledge_folder: str = typer.Option(
-        None, "--remote-knowledge-folder", help=REMOTE_KNOWLEDGE_FOLDER_HELP
-    ),
+    knowledge_path: Annotated[
+        list[str] | None, typer.Option("--knowledge-path", help=KNOWLEDGE_PATH_HELP)
+    ] = None,
 ) -> None:
-    """Diagnose repo config, gcloud Drive access, and agent CLIs on PATH."""
-    local_knowledge_path, remote_knowledge_folder = _resolve_options(
-        ctx, local_knowledge_path, remote_knowledge_folder
-    )
-    if not run_doctor(local_knowledge_path, remote_knowledge_folder):
+    """Diagnose knowledge path config and agent CLIs on PATH."""
+    knowledge_path = _resolve_options(ctx, knowledge_path)
+    if not run_doctor(knowledge_path):
         raise typer.Exit(1)
 
 

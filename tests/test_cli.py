@@ -16,7 +16,7 @@ def stub_mcp_server(monkeypatch):
     /tmp state file. The per-project MCP-config injection still runs for real."""
     monkeypatch.setattr(
         "recall_engine.cli.ensure_server",
-        lambda repo=None, token=None: ServerInfo(
+        lambda token=None: ServerInfo(
             url="http://127.0.0.1:9/mcp", port=9, token="testtok", pid=os.getpid()
         ),
     )
@@ -73,13 +73,13 @@ def test_wrap_detects_claude_wrapper(monkeypatch, tmp_path):
         name="claude-company",
     )
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "claude-company"])
+    result = runner.invoke(app, ["wrap", "--knowledge-path", str(repo), "claude-company"])
     assert result.exit_code == 7
     assert "launching claude-company..." in result.output
 def test_wrap_pi_launches_without_adapter(monkeypatch, tmp_path):
     # pi >= 0.99 has built-in MCP, so wrap no longer requires pi-mcp-adapter.
     repo = tmp_path / "repo"
-    (repo / "src").mkdir(parents=True)
+    repo.mkdir()
     project = tmp_path / "project"
     project.mkdir()
     install_fake_claude(
@@ -89,16 +89,39 @@ def test_wrap_pi_launches_without_adapter(monkeypatch, tmp_path):
         name="pi",
     )
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "pi"])
+    result = runner.invoke(app, ["wrap", "--knowledge-path", str(repo), "pi"])
     assert result.exit_code == 0
     assert "launching pi..." in result.output
     # Injected .pi/mcp.json is cleaned up on exit.
     assert not (project / ".pi" / "mcp.json").exists()
-def test_wrap_claude_repo_error_exits_1(monkeypatch, tmp_path):
+def test_wrap_missing_knowledge_path_exits_2(tmp_path):
     missing = tmp_path / "missing"
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(missing), "claude"])
-    assert result.exit_code == 1
-    assert f"--local-knowledge-path points to a missing directory: {missing}" in result.output
+    result = runner.invoke(app, ["wrap", "--knowledge-path", str(missing), "claude"])
+    assert result.exit_code == 2
+    assert f"--knowledge-path points to a missing directory: {missing}" in result.output
+def test_wrap_accepts_multiple_knowledge_paths(monkeypatch, tmp_path):
+    repo_a = tmp_path / "repo-a"
+    repo_a.mkdir()
+    repo_b = tmp_path / "repo-b"
+    repo_b.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    install_fake_claude(tmp_path, monkeypatch, "exit 0")
+    monkeypatch.chdir(project)
+    result = runner.invoke(
+        app,
+        [
+            "wrap",
+            "--knowledge-path",
+            str(repo_a),
+            "--knowledge-path",
+            str(repo_b),
+            "claude",
+        ],
+    )
+    assert result.exit_code == 0
+    assert f"knowledge path: {repo_a.resolve()}" in result.output
+    assert f"knowledge path: {repo_b.resolve()}" in result.output
 @pytest.mark.parametrize(
     ("agent", "link_dir"),
     (
@@ -130,9 +153,9 @@ def test_wrap_full_lifecycle(monkeypatch, tmp_path, agent, link_dir):
         name=agent,
     )
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), agent])
+    result = runner.invoke(app, ["wrap", "--knowledge-path", str(repo), agent])
     assert result.exit_code == 7
-    assert f"knowledge repo: {repo.resolve()}" in result.output
+    assert f"knowledge path: {repo.resolve()}" in result.output
     assert f"launching {agent}..." in result.output
     assert probe.read_text().strip() == "present"
     # Everything injected is torn down when the session ends.
@@ -145,15 +168,15 @@ def test_wrap_full_lifecycle(monkeypatch, tmp_path, agent, link_dir):
     else:
         assert not (project / ".agy").exists()
 def wrap_for_search_backend(monkeypatch, tmp_path):
-    """Run `wrap claude` against a one-note repo; return the CliRunner result."""
+    """Run `wrap claude` against a one-note knowledge dir; return the result."""
     repo = tmp_path / "repo"
-    (repo / "src").mkdir(parents=True)
-    (repo / "src" / "n.md").write_text("hello keyword\n")
+    repo.mkdir()
+    (repo / "n.md").write_text("hello keyword\n")
     project = tmp_path / "project"
     project.mkdir()
     install_fake_claude(tmp_path, monkeypatch, "exit 0")
     monkeypatch.chdir(project)
-    return runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "claude"])
+    return runner.invoke(app, ["wrap", "--knowledge-path", str(repo), "claude"])
 @pytest.mark.skipif(search.ugrep_path() is None, reason="ugrep not installed")
 def test_wrap_reports_ugrep(monkeypatch, tmp_path):
     result = wrap_for_search_backend(monkeypatch, tmp_path)
@@ -171,10 +194,10 @@ def test_wrap_warns_when_ugrep_missing(monkeypatch, tmp_path):
 
 
 def test_wrap_injects_and_restores_mcp_config(monkeypatch, tmp_path):
-    # The agent's MCP config points at the shared server (with the repo header)
+    # The agent's MCP config points at the shared server (with the paths header)
     # while it runs, and is cleaned up afterwards.
     repo = tmp_path / "repo"
-    (repo / "src").mkdir(parents=True)
+    repo.mkdir()
     project = tmp_path / "project"
     project.mkdir()
     mcp_json = project / ".mcp.json"
@@ -186,14 +209,14 @@ def test_wrap_injects_and_restores_mcp_config(monkeypatch, tmp_path):
         f'cat "{mcp_json}" > "{probe}"\nexit 0',
     )
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "claude"])
+    result = runner.invoke(app, ["wrap", "--knowledge-path", str(repo), "claude"])
     assert result.exit_code == 0
-    # The MCP config was present during the child run and pinned the repo header.
+    # The MCP config was present during the child run and pinned the paths header.
     injected = json.loads(probe.read_text())
     entry = injected["mcpServers"]["recall-engine"]
     assert entry["type"] == "http"
     assert entry["url"] == "http://127.0.0.1:9/mcp"
-    assert entry["headers"]["X-Recall-Repo"] == str(repo.resolve())
+    assert entry["headers"]["X-Recall-Paths"] == json.dumps([str(repo.resolve())])
     # ...and it is cleaned up afterwards.
     assert not mcp_json.exists()
 def test_wrap_forwards_extra_args_to_agent(monkeypatch, tmp_path):
@@ -205,7 +228,7 @@ def test_wrap_forwards_extra_args_to_agent(monkeypatch, tmp_path):
     out = tmp_path / "args.txt"
     install_fake_claude(tmp_path, monkeypatch, f'echo "$@" > "{out}"\nexit 0')
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "claude", "arg1", "arg2", "--resume"])
+    result = runner.invoke(app, ["wrap", "--knowledge-path", str(repo), "claude", "arg1", "arg2", "--resume"])
     assert result.exit_code == 0
     assert out.read_text().strip() == "arg1 arg2 --resume"
 def test_wrap_agy_launched_with_add_dir(monkeypatch, tmp_path):
@@ -218,7 +241,7 @@ def test_wrap_agy_launched_with_add_dir(monkeypatch, tmp_path):
     out = tmp_path / "args.txt"
     install_fake_claude(tmp_path, monkeypatch, f'echo "$@" > "{out}"\nexit 0', name="agy")
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "agy", "chat"])
+    result = runner.invoke(app, ["wrap", "--knowledge-path", str(repo), "agy", "chat"])
     assert result.exit_code == 0
     parts = out.read_text().split()
     assert parts[0] == "--add-dir"
@@ -233,25 +256,25 @@ def test_wrap_claude_attaches_to_live_session(monkeypatch, tmp_path):
     project.mkdir()
     install_fake_claude(tmp_path, monkeypatch, "exit 0")
     monkeypatch.chdir(project)
-    # A first live session already injected the skill for the SAME repo.
+    # A first live session already injected the skill for the SAME paths.
     from recall_engine.skill import inject_skill
-    inject_skill(repo)
+    inject_skill([repo])
     marker = project / ".agents" / "skills" / ".recall-engine-marker.json"
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         record = json.loads(marker.read_text())
         record["pids"] = [other.pid]
         marker.write_text(json.dumps(record))
-        result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "claude"])
+        result = runner.invoke(app, ["wrap", "--knowledge-path", str(repo), "claude"])
         assert result.exit_code == 0            # attached, not refused
         assert marker.exists()                  # other session survives
         assert other.pid in json.loads(marker.read_text())["pids"]
     finally:
         other.terminate()
         other.wait()
-def test_wrap_auto_detects_repo_from_live_session(monkeypatch, tmp_path):
-    # Second wrap in the same project inherits the running session's repo
-    # without passing --local-knowledge-path.
+def test_wrap_auto_detects_paths_from_live_session(monkeypatch, tmp_path):
+    # Second wrap in the same project inherits the running session's paths
+    # without passing --knowledge-path.
     import subprocess
     import sys
     repo = tmp_path / "repo"
@@ -261,30 +284,30 @@ def test_wrap_auto_detects_repo_from_live_session(monkeypatch, tmp_path):
     install_fake_claude(tmp_path, monkeypatch, "exit 0")
     monkeypatch.chdir(project)
     from recall_engine.skill import inject_skill
-    inject_skill(repo)  # a first session set up the injection for `repo`
+    inject_skill([repo])  # a first session set up the injection for `repo`
     marker = project / ".agents" / "skills" / ".recall-engine-marker.json"
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         record = json.loads(marker.read_text())
         record["pids"] = [other.pid]
         marker.write_text(json.dumps(record))
-        # No --local-knowledge-path: the wrapper must auto-detect `repo` and attach.
+        # No --knowledge-path: the wrapper must auto-detect `repo` and attach.
         result = runner.invoke(app, ["wrap", "claude"])
         assert result.exit_code == 0
-        assert f"knowledge repo: {repo.resolve()}" in result.output
+        assert f"knowledge path: {repo.resolve()}" in result.output
         assert other.pid in json.loads(marker.read_text())["pids"]
     finally:
         other.terminate()
         other.wait()
 def test_wrap_without_config_and_no_session_exits_2(monkeypatch, tmp_path):
-    # No --local-knowledge-path and no live session -> the config error fires.
+    # No --knowledge-path and no live session -> the config error fires.
     project = tmp_path / "project"
     project.mkdir()
     install_fake_claude(tmp_path, monkeypatch, "exit 0")
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["wrap", "claude"])
     assert result.exit_code == 2
-    assert "pass --local-knowledge-path" in result.output
+    assert "pass --knowledge-path" in result.output
 def test_wrap_claude_missing_claude_restores_and_exits_1(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -298,7 +321,7 @@ def test_wrap_claude_missing_claude_restores_and_exits_1(monkeypatch, tmp_path):
     empty.mkdir()
     monkeypatch.setenv("PATH", str(empty))
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "claude"])
+    result = runner.invoke(app, ["wrap", "--knowledge-path", str(repo), "claude"])
     assert result.exit_code == 1
     # Injection was rolled back on the launcher error path.
     assert not (project / ".agents" / "skills" / "recall-engine").exists()
@@ -328,139 +351,41 @@ def test_unwrap_cleans_stale_state_and_reports_empty_project(monkeypatch, tmp_pa
     result = runner.invoke(app, ["unwrap"])
     assert result.exit_code == 0
     assert "nothing to clean" in result.output
-def _stub_repo_first(monkeypatch, repo_first: bool):
-    monkeypatch.setattr(
-        "recall_engine.cli.ensure_server",
-        lambda repo=None, token=None: ServerInfo(
-            url="http://127.0.0.1:9/mcp",
-            port=9,
-            token="testtok",
-            pid=os.getpid(),
-            repo_first=repo_first,
-        ),
-    )
-def test_wrap_first_repo_triggers_background_download(monkeypatch, tmp_path):
-    # First wrap of a repo (repo_first) + a Drive folder -> background sync.
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    project = tmp_path / "project"
-    project.mkdir()
-    install_fake_claude(tmp_path, monkeypatch, "exit 0")
-    monkeypatch.chdir(project)
-    _stub_repo_first(monkeypatch, True)
-    calls = []
-    monkeypatch.setattr(
-        "recall_engine.cli._spawn_background_download",
-        lambda repo, drive_folder: calls.append((repo, drive_folder)),
-    )
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "--remote-knowledge-folder", "Shared", "claude"])
-    assert result.exit_code == 0
-    assert calls == [(repo.resolve(), "Shared")]
-    assert "drive sync: downloading" in result.output
-def test_wrap_non_first_repo_skips_background_download(monkeypatch, tmp_path):
-    # repo_first is False -> no auto-sync even with a Drive folder set.
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    project = tmp_path / "project"
-    project.mkdir()
-    install_fake_claude(tmp_path, monkeypatch, "exit 0")
-    monkeypatch.chdir(project)
-    _stub_repo_first(monkeypatch, False)
-    calls = []
-    monkeypatch.setattr(
-        "recall_engine.cli._spawn_background_download",
-        lambda repo, drive_folder: calls.append((repo, drive_folder)),
-    )
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "--remote-knowledge-folder", "Shared", "claude"])
-    assert result.exit_code == 0
-    assert calls == []
-    assert "drive sync:" not in result.output  # attach -> stay silent
-def test_wrap_first_repo_without_drive_folder_skips_download(monkeypatch, tmp_path):
-    # repo_first is True but no Drive folder configured -> nothing to download.
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    project = tmp_path / "project"
-    project.mkdir()
-    install_fake_claude(tmp_path, monkeypatch, "exit 0")
-    monkeypatch.chdir(project)
-    _stub_repo_first(monkeypatch, True)
-    calls = []
-    monkeypatch.setattr(
-        "recall_engine.cli._spawn_background_download",
-        lambda repo, drive_folder: calls.append((repo, drive_folder)),
-    )
-    result = runner.invoke(app, ["wrap", "--local-knowledge-path", str(repo), "claude"])
-    assert result.exit_code == 0
-    assert calls == []
-    assert "drive sync: skipped" in result.output
-def test_spawn_background_download_command(monkeypatch, tmp_path):
-    # The child gets its config on the command line, not through the environment.
-    import subprocess
-    import sys
-
-    from recall_engine import cli
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    monkeypatch.setattr(cli, "log_path", lambda: tmp_path / "mcp.log")
-    recorded = {}
-    def fake_popen(argv, **kwargs):
-        recorded["argv"] = argv
-        recorded["kwargs"] = kwargs
-        return object()
-    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
-    cli._spawn_background_download(repo, "Shared")
-    assert recorded["argv"] == [
-        sys.executable, "-m", "recall_engine", "sync", "download",
-        "--local-knowledge-path", str(repo),
-        "--remote-knowledge-folder", "Shared",
-    ]
-    assert "env" not in recorded["kwargs"]
-    assert recorded["kwargs"]["start_new_session"] is True
-    assert recorded["kwargs"]["stdout"] == subprocess.DEVNULL
-    assert recorded["kwargs"]["stdin"] == subprocess.DEVNULL
-def test_spawn_background_download_swallows_errors(monkeypatch, tmp_path):
-    from recall_engine import cli
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    monkeypatch.setattr(cli, "log_path", lambda: tmp_path / "mcp.log")
-    def boom(*args, **kwargs):
-        raise OSError("cannot spawn")
-    monkeypatch.setattr(cli.subprocess, "Popen", boom)
-    # Must not raise.
-    cli._spawn_background_download(repo, "Shared")
 def test_options_passed_before_the_command_reach_it(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(
         "recall_engine.cli.run_doctor",
-        lambda local, remote: bool(captured.update(local=local, remote=remote)) or True,
+        lambda paths: bool(captured.update(paths=paths)) or True,
     )
     result = runner.invoke(
         app,
         [
-            "--local-knowledge-path",
+            "--knowledge-path",
             str(tmp_path),
-            "--remote-knowledge-folder",
-            "Shared",
+            "--knowledge-path",
+            str(tmp_path / "nested"),
             "doctor",
         ],
     )
     assert result.exit_code == 0
-    assert captured == {"local": str(tmp_path), "remote": "Shared"}
+    assert captured == {
+        "paths": [str(tmp_path), str(tmp_path / "nested")],
+    }
 def test_command_options_win_over_the_ones_before_the_command(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(
         "recall_engine.cli.run_doctor",
-        lambda local, remote: bool(captured.update(local=local, remote=remote)) or True,
+        lambda paths: bool(captured.update(paths=paths)) or True,
     )
     result = runner.invoke(
         app,
         [
-            "--local-knowledge-path",
+            "--knowledge-path",
             "/global/repo",
             "doctor",
-            "--local-knowledge-path",
+            "--knowledge-path",
             str(tmp_path),
         ],
     )
     assert result.exit_code == 0
-    assert captured["local"] == str(tmp_path)
+    assert captured["paths"] == [str(tmp_path)]

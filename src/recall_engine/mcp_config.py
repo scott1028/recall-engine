@@ -1,12 +1,13 @@
 """Reversible injection of the shared MCP server into each agent's config.
 
-A single machine-wide HTTP MCP server serves many repos; each agent's config
-carries the repo in the `X-Recall-Repo` request header (plus an optional
-`X-Recall-Token`), so the server routes per connection. This module writes that
-per-agent config entry on `wrap` and removes it when the session ends.
+A single machine-wide HTTP MCP server serves many sessions; each agent's config
+carries the knowledge paths in the `X-Recall-Paths` request header (a JSON
+array of absolute directory paths, plus an optional `X-Recall-Token`), so the
+server routes per connection. This module writes that per-agent config entry on
+`wrap` and removes it when the session ends.
 
 Structure mirrors skill.py: a per-project-cwd marker holds a pid refcount so
-multiple wrap sessions in the same dir (same repo) attach instead of
+multiple wrap sessions in the same dir (same knowledge paths) attach instead of
 re-injecting; full-file backups let restore return each config byte-identical.
 """
 
@@ -16,6 +17,7 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,16 +65,22 @@ def _backup_path(config_path: Path) -> Path:
     return config_path.with_name(config_path.name + BACKUP_SUFFIX)
 
 
-def _build_headers(repo_path: Path, token: str | None) -> dict[str, str]:
-    headers = {"X-Recall-Repo": str(repo_path)}
+def _build_headers(knowledge_paths: Sequence[Path], token: str | None) -> dict[str, str]:
+    # JSON array so non-ASCII paths stay safely inside the header value.
+    headers = {"X-Recall-Paths": json.dumps([str(path) for path in knowledge_paths])}
     if token is not None:
         headers["X-Recall-Token"] = token
     return headers
 
 
-def _write_entry(spec: McpConfigSpec, repo_path: Path, url: str, token: str | None) -> None:
+def _write_entry(
+    spec: McpConfigSpec,
+    knowledge_paths: Sequence[Path],
+    url: str,
+    token: str | None,
+) -> None:
     """Write our server entry into the agent's config, preserving user content."""
-    headers = _build_headers(repo_path, token)
+    headers = _build_headers(knowledge_paths, token)
     config_path = _config_path(spec)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if spec.fmt == "toml":
@@ -200,25 +208,31 @@ def _write_toml_entry(
 
 
 def inject_mcp_config(
-    agent: str, repo_path: Path, url: str, token: str | None = None
+    agent: str, knowledge_paths: Sequence[Path], url: str, token: str | None = None
 ) -> None:
     """Register the shared server in AGENTS[agent]'s config file. Idempotent;
-    multiple wrap sessions in the same dir with the SAME repo attach (refcount by
-    pid) instead of re-injecting. Refuse to attach if a live session recorded a
-    different repo (raise McpConfigError). If agent has no .mcp spec, no-op."""
+    multiple wrap sessions in the same dir with the SAME knowledge paths attach
+    (refcount by pid) instead of re-injecting. Refuse to attach if a live
+    session recorded different paths (raise McpConfigError). If agent has no
+    .mcp spec, no-op."""
     agent_spec = AGENTS.get(agent)
     if agent_spec is None or agent_spec.mcp is None:
         return
     with _mcp_lock():
-        _inject_locked(agent, agent_spec.mcp, repo_path, url, token)
+        _inject_locked(agent, agent_spec.mcp, knowledge_paths, url, token)
 
 
 def _inject_locked(
-    agent: str, spec: McpConfigSpec, repo_path: Path, url: str, token: str | None
+    agent: str,
+    spec: McpConfigSpec,
+    knowledge_paths: Sequence[Path],
+    url: str,
+    token: str | None,
 ) -> None:
     """Inject logic; assumes the MCP lock is already held."""
     marker = _marker_path()
     config_path = _config_path(spec)
+    paths_value = [str(path) for path in knowledge_paths]
 
     if marker.exists():
         try:
@@ -228,28 +242,30 @@ def _inject_locked(
         live = [p for p in _marker_pids(record) if is_pid_alive(p)]
         if live:
             # A live session already registered the server here: attach to it.
-            recorded_repo = record.get("repo_path")
-            if recorded_repo is not None and recorded_repo != str(repo_path):
+            recorded_paths = record.get("knowledge_paths")
+            if recorded_paths is not None and recorded_paths != paths_value:
                 raise McpConfigError(
-                    "another wrap session is active in this directory with a "
-                    "different knowledge repo; refusing to attach. Run "
+                    "another wrap session is active in this directory with "
+                    "different knowledge paths; refusing to attach. Run "
                     "'recall-engine unwrap' if that session is gone."
                 )
             record["pids"] = sorted(set(live) | {os.getpid()})
             record.pop("pid", None)  # migrate off the legacy single-pid field
-            record.setdefault("repo_path", str(repo_path))
+            record.setdefault("knowledge_paths", paths_value)
             configs = record.setdefault("configs", [])
             if not any(c["path"] == str(config_path) for c in configs):
                 # A new agent joins this session: back up + write its config.
                 configs.append(
-                    _backup_and_write(agent, spec, config_path, repo_path, url, token)
+                    _backup_and_write(
+                        agent, spec, config_path, knowledge_paths, url, token
+                    )
                 )
             else:
                 # Already registered: re-assert the entry so a recall-engine
                 # upgrade patches new/changed fields (e.g. pi's exposure) into
                 # a config an older version injected. The first-touch backup
                 # still holds the user's original, so restore stays correct.
-                _write_entry(spec, repo_path, url, token)
+                _write_entry(spec, knowledge_paths, url, token)
             atomic_write_json(marker, record)
             return
         # No live owner (all dead): clean up stale state, then re-inject fresh.
@@ -260,12 +276,14 @@ def _inject_locked(
         _restore_locked(force=True)
 
     # Fresh inject: back up + write this agent's config, record a new marker.
-    entry = _backup_and_write(agent, spec, config_path, repo_path, url, token)
+    entry = _backup_and_write(
+        agent, spec, config_path, knowledge_paths, url, token
+    )
     atomic_write_json(
         marker,
         {
             "pids": [os.getpid()],
-            "repo_path": str(repo_path),
+            "knowledge_paths": paths_value,
             "configs": [entry],
             "injected_at": datetime.now(timezone.utc).isoformat(),
         },
@@ -276,7 +294,7 @@ def _backup_and_write(
     agent: str,
     spec: McpConfigSpec,
     config_path: Path,
-    repo_path: Path,
+    knowledge_paths: Sequence[Path],
     url: str,
     token: str | None,
 ) -> dict:
@@ -287,7 +305,7 @@ def _backup_and_write(
         backup = _backup_path(config_path)
         shutil.copy2(config_path, backup)
     try:
-        _write_entry(spec, repo_path, url, token)
+        _write_entry(spec, knowledge_paths, url, token)
     except Exception:
         # A parse/shape error must not leave a stray backup behind (the
         # original config is untouched since the write never happened).
