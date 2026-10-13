@@ -186,6 +186,38 @@ own with `--api-key <key>` (URL-encoded in the printed URL). The server binds
 `--web-host 0.0.0.0` effectively opens remote command execution to anyone who
 gets the URL; put it behind a TLS reverse proxy before exposing it.
 
+`--web` is **read-only by default**: each agent runs in a
+[bubblewrap](https://github.com/containers/bubblewrap) sandbox (Linux only;
+`sudo apt install bubblewrap`), so a browser user cannot change your files
+even through `!cmd` or by switching the agent's permission mode.
+
+| Path | Inside the sandbox |
+|---|---|
+| `<project>/.tmp/` | writable; the only place writes reach the host |
+| `$HOME`, `/tmp` | writable, but discarded when the connection ends |
+| the project dir, every `--knowledge-path`, the rest of `/` | read-only (EROFS) |
+| `/run` | hidden (empty tmpfs); only the DNS resolver config comes back |
+
+The agent is also started with its own read-only flags where it has them
+(claude `--disallowedTools Edit,Write,NotebookEdit`, gemini `--approval-mode
+plan`, pi `--exclude-tools edit,write`), so the model does not try to edit in
+the first place. codex gets none: its own sandbox cannot nest inside bubblewrap,
+so run it with `sandbox_mode = "danger-full-access"` (the bubblewrap sandbox
+still blocks writes). Pass `--web-writable` to turn
+the lock off. Because `$HOME` writes are discarded, an OAuth token refreshed
+during a session is lost and you may need to log in again locally; API-key
+authentication is not affected.
+
+Hiding `/run` matters because a read-only mount does not stop a process from
+connecting to a host socket and asking something outside the sandbox to write:
+the systemd `--user` manager, the D-Bus session bus, the docker socket, and the
+X11 auth cookie all live there. `DBUS_SESSION_BUS_ADDRESS`, `DISPLAY`,
+`WAYLAND_DISPLAY`, `XAUTHORITY` and `SSH_AUTH_SOCK` are unset inside too.
+Residual risk: the network is not isolated (the agent needs its API and the MCP
+server), so abstract Unix sockets such as X11's `@/tmp/.X11-unix/X0` stay
+reachable, and a cookie in `~/.Xauthority` is still readable. For exposed use,
+run the server as a dedicated user without a desktop session.
+
 ## Options
 
 `wrap` and `doctor` both take the same option. For `wrap`, pass it before
@@ -197,6 +229,7 @@ gets the URL; put it behind a TLS reverse proxy before exposing it.
 | `--web` | `wrap` only: serve the agent in a browser terminal instead of this one (see Web terminal) |
 | `--web-host` | `wrap --web` bind address (default `127.0.0.1`) |
 | `--web-port` | `wrap --web` port (default `7681`) |
+| `--web-writable` | `wrap --web` without the read-only bubblewrap sandbox or the agents' read-only flags |
 | `--api-key` | `wrap --web` API key the browser terminal requires (default: a random key) |
 
 ## Doctor

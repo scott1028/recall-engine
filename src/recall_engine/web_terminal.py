@@ -12,9 +12,11 @@ import fcntl
 import json
 import os
 import secrets
+import shutil
 import signal
 import struct
 import subprocess
+import sys
 import termios
 from pathlib import Path
 
@@ -25,6 +27,76 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 
 STATIC_DIR = Path(__file__).parent / "static"
+RESOLV_CONF = Path("/etc/resolv.conf")
+# Host session endpoints (D-Bus, display, ssh-agent): hidden or unusable in
+# the sandbox, so they are unset there.
+_HOST_SESSION_ENV = (
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "SSH_AUTH_SOCK",
+)
+
+
+class SandboxError(Exception):
+    """The read-only bubblewrap sandbox cannot run."""
+
+
+def build_sandbox_prefix(project_dir: Path, knowledge_paths: list[Path]) -> list[str]:
+    """Return the bwrap argv prefix that runs an agent read-only.
+
+    Only <project>/.tmp is writable on the host; $HOME and /tmp get throwaway
+    layers so agent state writes succeed but vanish. /run is hidden too: a
+    read-only mount does not stop connect() on host sockets there (systemd
+    --user, D-Bus, docker, the X11 cookie), which could write for the agent;
+    only the dir holding the real resolv.conf comes back, so DNS still works.
+    Later mounts cover earlier ones, so the order matters. No --new-session (keeps the ctty, so resize
+    sends SIGWINCH) and no --unshare-pid (stop_agent's killpg must reach it).
+    """
+    home = str(Path.home())
+    writable = project_dir / ".tmp"
+    writable.mkdir(exist_ok=True)
+    prefix = [
+        shutil.which("bwrap") or "bwrap",
+        "--ro-bind", "/", "/",
+        "--dev-bind", "/dev", "/dev",
+        "--tmpfs", "/dev/shm",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+        "--tmpfs", "/run",
+    ]  # fmt: skip
+    resolv_dir = RESOLV_CONF.resolve().parent
+    if resolv_dir.is_relative_to("/run"):
+        prefix += ["--ro-bind-try", str(resolv_dir), str(resolv_dir)]
+    prefix += ["--overlay-src", home, "--tmp-overlay", home]
+    for path in (project_dir, *knowledge_paths):
+        prefix += ["--ro-bind", str(path), str(path)]
+    prefix += [
+        "--bind", str(writable), str(writable),
+        *(arg for name in _HOST_SESSION_ENV for arg in ("--unsetenv", name)),
+        "--die-with-parent",
+        "--chdir", str(project_dir),
+        "--",
+    ]  # fmt: skip
+    return prefix
+
+
+def check_sandbox(prefix: list[str]) -> None:
+    """Run `true` in the sandbox; raise SandboxError when it cannot start."""
+    hint = "or pass --web-writable to serve without the read-only lock"
+    if sys.platform != "linux" or shutil.which("bwrap") is None:
+        raise SandboxError(
+            "--web is read-only by default and needs Linux with bubblewrap "
+            f"(sudo apt install bubblewrap), {hint}."
+        )
+    probe = subprocess.run([*prefix, "true"], capture_output=True, check=False)
+    if probe.returncode != 0:
+        stderr = probe.stderr.decode(errors="replace").strip()
+        raise SandboxError(
+            f"bubblewrap sandbox failed to start: {stderr}; check that "
+            f"unprivileged user namespaces are allowed, {hint}."
+        )
 
 
 def set_pty_size(fd: int, cols: int, rows: int) -> None:

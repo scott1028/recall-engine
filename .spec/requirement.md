@@ -187,6 +187,47 @@ Scenario: report the agent's exit to the browser
 - When the agent exits on its own with code `3`
 - Then the server closes the WebSocket with code `1000` and a reason naming `3`
 
+Scenario: run read-only by default
+- Given the user runs `recall-engine wrap --web <agent>` without `--web-writable`
+- When a browser connection spawns the agent
+- Then the agent runs inside a bubblewrap sandbox
+- And the agent gets its own read-only arguments where it has them
+- And writes to the project dir and every knowledge path fail with EROFS
+- And the CLI prints `web terminal: read-only (writable: <cwd>/.tmp)`
+
+Scenario: write to the project's .tmp directory
+- Given a read-only web session
+- When the agent writes under `<cwd>/.tmp/`
+- Then the file exists on the host
+
+Scenario: discard home and /tmp writes
+- Given a read-only web session
+- When the agent writes under `$HOME` or `/tmp`
+- Then the write succeeds inside the sandbox
+- And nothing changes on the host
+
+Scenario: hide host sockets under /run
+- Given a read-only web session
+- When the agent looks for host services under `/run`
+- Then `/run` is an empty tmpfs (no systemd `--user`, D-Bus session, docker
+  socket, or X11 cookie), except the directory holding the real
+  `/etc/resolv.conf`, re-bound read-only so DNS still resolves
+- And `DBUS_SESSION_BUS_ADDRESS`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`,
+  and `SSH_AUTH_SOCK` are unset
+- And abstract Unix sockets stay reachable because the network is not isolated
+
+Scenario: turn the lock off
+- Given the user runs `recall-engine wrap --web --web-writable <agent>`
+- When a browser connection spawns the agent
+- Then it runs without the sandbox and without read-only arguments
+
+Scenario: refuse to start without a usable bubblewrap
+- Given bubblewrap is missing or cannot create its sandbox
+- When the user runs `recall-engine wrap --web <agent>`
+- Then the command exits with code `1`
+- And the message mentions bubblewrap and `--web-writable`
+- And the injected skill and MCP config are restored
+
 Scenario: restore when the web server stops
 - Given the web terminal is running with injected skill and MCP config
 - When the user presses Ctrl-C, closes the server's terminal, or sends SIGTERM

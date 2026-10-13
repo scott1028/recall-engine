@@ -420,6 +420,7 @@ def test_wrap_web_serves_agent_and_restores_config(monkeypatch, tmp_path, agent)
         [
             "wrap",
             "--web",
+            "--web-writable",
             "--web-host",
             "0.0.0.0",
             "--web-port",
@@ -470,7 +471,7 @@ def test_wrap_web_uses_given_api_key(monkeypatch, tmp_path, api_key_args, printe
     )
     result = runner.invoke(
         app,
-        ["wrap", "--web", *api_key_args, "--knowledge-path", str(repo), "claude"],
+        ["wrap", "--web", "--web-writable", *api_key_args, "--knowledge-path", str(repo), "claude"],
     )
     assert result.exit_code == 0, result.output
     assert captured["api_key"] == api_key_args[1]
@@ -491,13 +492,67 @@ def test_wrap_web_generates_random_api_key(monkeypatch, tmp_path):
     )
     outputs = [
         runner.invoke(
-            app, ["wrap", "--web", "--knowledge-path", str(repo), "claude"]
+            app,
+            ["wrap", "--web", "--web-writable", "--knowledge-path", str(repo), "claude"],
         ).output
         for _ in range(2)
     ]
     assert len(keys[0]) >= 32 and keys[0] != keys[1]
     for key, output in zip(keys, outputs):
         assert f"/?api-key={key}\n" in output
+
+
+def run_wrap_web(monkeypatch, tmp_path, *extra_args):
+    """Run `wrap --web [extra_args] claude chat` with run_web captured."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    install_fake_claude(tmp_path, monkeypatch, "exit 0")
+    monkeypatch.chdir(project)
+    captured = {}
+    monkeypatch.setattr(
+        "recall_engine.cli.run_web",
+        lambda command, env, host, port, api_key: captured.update(command=command)
+        or 0,
+    )
+    result = runner.invoke(
+        app,
+        ["wrap", "--web", *extra_args, "--knowledge-path", str(repo), "claude", "chat"],
+    )
+    return result, captured, project
+
+
+def test_wrap_web_is_read_only_by_default(monkeypatch, tmp_path):
+    # The sandbox probe needs a working bwrap; this test only checks the command.
+    monkeypatch.setattr("recall_engine.cli.check_sandbox", lambda prefix: None)
+    result, captured, project = run_wrap_web(monkeypatch, tmp_path)
+    assert result.exit_code == 0, result.output
+    command = captured["command"]
+    assert Path(command[0]).name == "bwrap"
+    agent_part = " ".join(command[command.index("--") + 1 :])
+    assert "--disallowedTools Edit,Write,NotebookEdit chat" in agent_part
+    assert f"web terminal: read-only (writable: {project.resolve() / '.tmp'})" in result.output
+
+
+def test_wrap_web_writable_skips_the_sandbox(monkeypatch, tmp_path):
+    result, captured, _ = run_wrap_web(monkeypatch, tmp_path, "--web-writable")
+    assert result.exit_code == 0, result.output
+    command = " ".join(captured["command"])
+    assert "bwrap" not in command
+    assert "--disallowedTools" not in command
+    assert "read-only" not in result.output
+
+
+def test_wrap_web_without_bwrap_exits_1_and_restores(monkeypatch, tmp_path):
+    monkeypatch.setattr("recall_engine.web_terminal.shutil.which", lambda name: None)
+    result, captured, project = run_wrap_web(monkeypatch, tmp_path)
+    assert result.exit_code == 1
+    assert "bubblewrap" in result.output
+    assert "--web-writable" in result.output
+    assert not captured
+    assert not (project / ".agents" / "skills" / "recall-engine").exists()
+    assert not (project / ".mcp.json").exists()
 
 def test_wrap_web_sigterm_restores_config(monkeypatch, tmp_path):
     # uvicorn re-raises a captured SIGTERM after shutdown; wrap must still reach
@@ -538,6 +593,7 @@ def test_wrap_web_sigterm_restores_config(monkeypatch, tmp_path):
             script,
             "wrap",
             "--web",
+            "--web-writable",
             "--web-port",
             str(port),
             "--knowledge-path",

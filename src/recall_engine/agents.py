@@ -42,6 +42,9 @@ class AgentSpec:
     # agy reads a project's .agents/ config (skill + MCP) only when the dir is
     # in its active workspace, so it must be launched with `--add-dir <project>`.
     needs_workspace_dir: bool = False
+    # Asks the agent itself not to edit files under `wrap --web` (read-only by
+    # default). Only a hint: the bwrap sandbox is what blocks the writes.
+    read_only_args: tuple[str, ...] = ()
 
 
 AGENTS: dict[str, AgentSpec] = {
@@ -59,6 +62,8 @@ AGENTS: dict[str, AgentSpec] = {
             header_field="headers",
             type_value="http",
         ),
+        # Bash stays allowed for read-only commands; the sandbox blocks writes.
+        read_only_args=("--disallowedTools", "Edit,Write,NotebookEdit"),
     ),
     "codex": AgentSpec(
         name="codex",
@@ -74,6 +79,9 @@ AGENTS: dict[str, AgentSpec] = {
             url_field="url",
             header_field="http_headers",
         ),
+        # No read_only_args: `--sandbox read-only` makes codex start its own
+        # bubblewrap, which cannot nest inside the --web sandbox (no user
+        # namespaces there), so every command it runs would fail.
     ),
     "pi": AgentSpec(
         name="pi",
@@ -93,6 +101,7 @@ AGENTS: dict[str, AgentSpec] = {
             header_field="headers",
             extra_fields={"exposure": "direct"},
         ),
+        read_only_args=("--exclude-tools", "edit,write"),
     ),
     "gemini": AgentSpec(
         name="gemini",
@@ -107,6 +116,7 @@ AGENTS: dict[str, AgentSpec] = {
             url_field="httpUrl",
             header_field="headers",
         ),
+        read_only_args=("--approval-mode", "plan"),
     ),
     "opencode": AgentSpec(
         name="opencode",

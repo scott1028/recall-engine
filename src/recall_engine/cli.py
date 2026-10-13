@@ -38,7 +38,12 @@ from recall_engine.skill import (
     inject_skill,
     restore_skill,
 )
-from recall_engine.web_terminal import run_web
+from recall_engine.web_terminal import (
+    SandboxError,
+    build_sandbox_prefix,
+    check_sandbox,
+    run_web,
+)
 
 KNOWLEDGE_PATH_HELP = (
     "Path to an existing local knowledge directory; its notes are found under "
@@ -125,6 +130,13 @@ def wrap(
     web_port: Annotated[
         int, typer.Option("--web-port", help="Port for --web.")
     ] = 7681,
+    web_writable: Annotated[
+        bool,
+        typer.Option(
+            "--web-writable",
+            help="Turn off the --web read-only lock (bubblewrap sandbox).",
+        ),
+    ] = False,
     api_key: Annotated[
         str | None,
         typer.Option(
@@ -193,6 +205,9 @@ def wrap(
             else []
         )
         if web:
+            read_only = not web_writable
+            if read_only:
+                pre_args += AGENTS[family].read_only_args
             command, env = build_agent_command(
                 knowledge_paths[0],
                 argv=agent_args,
@@ -200,6 +215,11 @@ def wrap(
                 install_hint=AGENTS[family].install_hint,
                 pre_args=pre_args,
             )
+            if read_only:
+                prefix = build_sandbox_prefix(Path.cwd(), knowledge_paths)
+                check_sandbox(prefix)
+                command = [*prefix, *command]
+                typer.echo(f"web terminal: read-only (writable: {Path.cwd() / '.tmp'})")
             api_key = api_key or secrets.token_urlsafe(24)
             typer.echo(
                 f"web terminal: http://{web_host}:{web_port}/"
@@ -214,7 +234,13 @@ def wrap(
                 install_hint=AGENTS[family].install_hint,
                 pre_args=pre_args,
             )
-    except (SkillError, SupervisorError, McpConfigError, LauncherError) as exc:
+    except (
+        SkillError,
+        SupervisorError,
+        McpConfigError,
+        LauncherError,
+        SandboxError,
+    ) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     finally:
