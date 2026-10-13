@@ -32,6 +32,9 @@ access to them.
 - The project uses `uv run pytest` and `uv run ruff check src tests` for checks.
 - The knowledge search shells out to `ugrep` when it is on `PATH`; without it an
   equivalent built-in Python scan runs. No search index is built or maintained.
+- `wrap --web` serves a Starlette/uvicorn app with xterm.js vendored under
+  `src/recall_engine/static/vendor/xterm/` (UMD builds plus their MIT
+  licenses); there is no JavaScript build step.
 - No JavaScript, TypeScript, webpack, Vite, or Next.js config is present.
 
 ## Feature: Configure Knowledge Paths
@@ -137,6 +140,57 @@ Scenario: restore when the session is interrupted or the terminal closes
 - When the user presses Ctrl-C (SIGINT) or closes the terminal (SIGHUP)
 - Then the signal is forwarded to the agent and the wrapper stays alive
 - And it tears down its injected skill and MCP config before exiting
+
+## Feature: Serve the Agent in a Browser Terminal
+
+`wrap --web <agent>` serves the wrapped agent through an xterm.js page instead
+of the current terminal.
+
+Scenario: start the web terminal
+- Given valid knowledge paths and a supported agent
+- When the user runs `recall-engine wrap --web <agent>`
+- Then the CLI injects the skill and MCP config as for a normal wrap
+- And it binds `127.0.0.1:7681` unless `--web-host` / `--web-port` are passed
+- And it prints the URL with a random `api-key`
+- And `GET /` returns the xterm.js page with its vendored assets
+
+Scenario: use a user-specified API key
+- Given the user runs `recall-engine wrap --web --api-key <key> <agent>`
+- When the web terminal starts
+- Then the server requires `<key>` instead of a random one
+- And the printed URL carries it URL-encoded as `/?api-key=<key>`
+
+Scenario: reject a connection without the API key
+- Given the web terminal is running
+- When a WebSocket connects with a wrong or missing `api-key`
+- Then the server closes it with code `1008` and reason `invalid api-key`
+- And it starts no agent
+
+Scenario: run one agent per connection in a PTY
+- Given a browser connects with the `api-key` and its terminal size
+- When the connection opens
+- Then the server spawns the agent in its own PTY of that size
+- And terminal bytes (including UTF-8 such as `你好`) flow both ways unchanged
+
+Scenario: resize the agent's terminal
+- Given a connected agent session
+- When the browser sends `{"type": "resize", "cols": 120, "rows": 40}`
+- Then the PTY size changes and the agent receives `SIGWINCH`
+
+Scenario: end the agent with its connection
+- Given a connected agent session
+- When the browser closes the connection
+- Then the agent's process group is hung up, and killed if it lingers
+
+Scenario: report the agent's exit to the browser
+- Given a connected agent session
+- When the agent exits on its own with code `3`
+- Then the server closes the WebSocket with code `1000` and a reason naming `3`
+
+Scenario: restore when the web server stops
+- Given the web terminal is running with injected skill and MCP config
+- When the user presses Ctrl-C, closes the server's terminal, or sends SIGTERM
+- Then the server shuts down and the CLI restores the skill and MCP config
 
 ## Feature: Inject and Restore the Skill
 

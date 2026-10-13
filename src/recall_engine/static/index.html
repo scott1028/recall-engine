@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>recall-engine</title>
+  <!-- Vendored xterm.js; versions in vendor/xterm/VERSIONS. -->
+  <link rel="stylesheet" href="vendor/xterm/xterm.css">
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; }
+    #terminal { position: fixed; inset: 0; padding: 4px; }
+  </style>
+</head>
+<body>
+  <div id="terminal"></div>
+  <script src="vendor/xterm/xterm.js"></script>
+  <script src="vendor/xterm/addon-fit.js"></script>
+  <script src="vendor/xterm/addon-unicode11.js"></script>
+  <script>
+    const term = new Terminal({ allowProposedApi: true, cursorBlink: true, scrollback: 10000 });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    // Match the agent's emoji/CJK cell widths.
+    term.loadAddon(new Unicode11Addon.Unicode11Addon());
+    term.unicode.activeVersion = '11';
+    term.open(document.getElementById('terminal'));
+    fit.fit();
+    term.focus();
+
+    // Relative URL so the page also works behind a reverse-proxy sub-path.
+    const url = new URL('ws', location.href);
+    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.search = '';
+    url.searchParams.set('api-key', new URLSearchParams(location.search).get('api-key') || '');
+    url.searchParams.set('cols', term.cols);
+    url.searchParams.set('rows', term.rows);
+
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    const encoder = new TextEncoder();
+    const send = (bytes) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(bytes);
+    };
+
+    ws.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) term.write(new Uint8Array(event.data));
+    };
+    ws.onclose = (event) => {
+      term.write(`\r\n[session closed: ${event.reason || event.code}]\r\n`);
+    };
+    term.onData((data) => send(encoder.encode(data)));
+    term.onBinary((data) => send(Uint8Array.from(data, (ch) => ch.charCodeAt(0) & 0xff)));
+    term.onResize(({ cols, rows }) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    });
+    window.addEventListener('resize', () => fit.fit());
+  </script>
+</body>
+</html>

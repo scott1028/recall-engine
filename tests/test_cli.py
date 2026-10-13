@@ -389,3 +389,183 @@ def test_command_options_win_over_the_ones_before_the_command(monkeypatch, tmp_p
     )
     assert result.exit_code == 0
     assert captured["paths"] == [str(tmp_path)]
+
+
+@pytest.mark.parametrize("agent", ("claude", "agy"))
+def test_wrap_web_serves_agent_and_restores_config(monkeypatch, tmp_path, agent):
+    # `wrap --web` hands the agent command to the web server instead of
+    # launching it, and tears down the injected config when the server stops.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    install_fake_claude(tmp_path, monkeypatch, "exit 0", name=agent)
+    monkeypatch.chdir(project)
+    captured = {}
+
+    def fake_run_web(command, env, host, port, api_key):
+        captured.update(command=command, env=env, host=host, port=port, api_key=api_key)
+        captured["skill_present"] = (
+            project / ".agents" / "skills" / "recall-engine" / "SKILL.md"
+        ).exists()
+        return 0
+
+    monkeypatch.setattr("recall_engine.cli.run_web", fake_run_web)
+    monkeypatch.setattr(
+        "recall_engine.cli.launch_agent",
+        lambda *a, **k: pytest.fail("launch_agent must not run with --web"),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "wrap",
+            "--web",
+            "--web-host",
+            "0.0.0.0",
+            "--web-port",
+            "9999",
+            "--knowledge-path",
+            str(repo),
+            agent,
+            "chat",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 9999
+    assert captured["api_key"]
+    assert f"/?api-key={captured['api_key']}" in result.output
+    assert captured["env"]["RECALL_REPO_PATH"] == str(repo.resolve())
+    assert captured["skill_present"]
+    command = " ".join(captured["command"])
+    assert command.endswith("chat")
+    if agent == "agy":
+        assert f"--add-dir {Path.cwd()}" in command
+    # Injection is torn down after the server stops.
+    assert not (project / ".agents" / "skills" / "recall-engine").exists()
+    assert not (project / ".mcp.json").exists()
+
+
+
+@pytest.mark.parametrize(
+    ("api_key_args", "printed"),
+    (
+        (["--api-key", "my-key"], "/?api-key=my-key\n"),
+        # Special characters are URL-encoded so the printed URL still works.
+        (["--api-key", "a&b#c=d e"], "/?api-key=a%26b%23c%3Dd%20e\n"),
+    ),
+)
+def test_wrap_web_uses_given_api_key(monkeypatch, tmp_path, api_key_args, printed):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    install_fake_claude(tmp_path, monkeypatch, "exit 0")
+    monkeypatch.chdir(project)
+    captured = {}
+    monkeypatch.setattr(
+        "recall_engine.cli.run_web",
+        lambda command, env, host, port, api_key: captured.update(api_key=api_key)
+        or 0,
+    )
+    result = runner.invoke(
+        app,
+        ["wrap", "--web", *api_key_args, "--knowledge-path", str(repo), "claude"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["api_key"] == api_key_args[1]
+    assert printed in result.output
+
+
+def test_wrap_web_generates_random_api_key(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    install_fake_claude(tmp_path, monkeypatch, "exit 0")
+    monkeypatch.chdir(project)
+    keys = []
+    monkeypatch.setattr(
+        "recall_engine.cli.run_web",
+        lambda command, env, host, port, api_key: keys.append(api_key) or 0,
+    )
+    outputs = [
+        runner.invoke(
+            app, ["wrap", "--web", "--knowledge-path", str(repo), "claude"]
+        ).output
+        for _ in range(2)
+    ]
+    assert len(keys[0]) >= 32 and keys[0] != keys[1]
+    for key, output in zip(keys, outputs):
+        assert f"/?api-key={key}\n" in output
+
+def test_wrap_web_sigterm_restores_config(monkeypatch, tmp_path):
+    # uvicorn re-raises a captured SIGTERM after shutdown; wrap must still reach
+    # its finally and restore the injected config. Run the real CLI in a
+    # subprocess so a regression fails cleanly instead of killing pytest.
+    import signal
+    import socket
+    import subprocess
+    import sys
+    import time
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    install_fake_claude(
+        tmp_path,
+        monkeypatch,
+        'if [ "$1" = "--version" ]; then echo "2.0.0 (Claude Code)"; fi\nexit 0',
+    )
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    # Stub the shared MCP server, as the autouse fixture does in-process.
+    script = (
+        "import os, sys\n"
+        "import recall_engine.cli as cli\n"
+        "from recall_engine.mcp_supervisor import ServerInfo\n"
+        "cli.ensure_server = lambda token=None: ServerInfo("
+        "url='http://127.0.0.1:9/mcp', port=9, token='t', pid=os.getpid())\n"
+        "cli.release_server = lambda owner_pid=None, force=False: False\n"
+        "cli.app(sys.argv[1:])\n"
+    )
+    runner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            script,
+            "wrap",
+            "--web",
+            "--web-port",
+            str(port),
+            "--knowledge-path",
+            str(repo),
+            "claude",
+        ],
+        cwd=project,
+        env=os.environ.copy(),
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        for line in runner.stdout:
+            if line.startswith("web terminal:"):
+                break
+        # Give uvicorn time to install its signal handlers and bind.
+        for _ in range(100):
+            with socket.socket() as sock:
+                if sock.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.05)
+        assert (project / ".mcp.json").exists()
+        runner.send_signal(signal.SIGTERM)
+        returncode = runner.wait(timeout=15)
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait()
+    assert returncode == 0
+    assert not (project / ".agents" / "skills" / "recall-engine").exists()
+    assert not (project / ".mcp.json").exists()

@@ -167,6 +167,25 @@ skill is the reliable trigger because its text enters the context directly,
 whereas an MCP server's `instructions` field is injected at the client's
 discretion.
 
+## Web terminal
+
+```bash
+recall-engine wrap --web --knowledge-path ~/workspace/notes claude
+# web terminal: http://127.0.0.1:7681/?api-key=...
+```
+
+`--web` serves the wrapped agent in a browser terminal (vendored xterm.js:
+colors, arrow keys, Ctrl+C, paste, resize, CJK input) instead of the current
+terminal. Open the printed URL; each browser tab gets its own agent process,
+which ends when the tab closes. The skill and MCP config are injected once and
+shared by every tab, and are restored when you stop the server with Ctrl+C.
+
+The WebSocket requires the `api-key` in the printed URL: a random key, or your
+own with `--api-key <key>` (URL-encoded in the printed URL). The server binds
+`127.0.0.1` by default. **The agent can run shell commands**, so
+`--web-host 0.0.0.0` effectively opens remote command execution to anyone who
+gets the URL; put it behind a TLS reverse proxy before exposing it.
+
 ## Options
 
 `wrap` and `doctor` both take the same option. For `wrap`, pass it before
@@ -175,6 +194,10 @@ discretion.
 | Option | Purpose |
 |---|---|
 | `--knowledge-path` | Path to an existing local knowledge directory; its notes are found under `<path>/**/*.md`. Repeat the option for multiple directories. Optional for a later `wrap` in a directory that already has a running session, where the knowledge paths are auto-detected |
+| `--web` | `wrap` only: serve the agent in a browser terminal instead of this one (see Web terminal) |
+| `--web-host` | `wrap --web` bind address (default `127.0.0.1`) |
+| `--web-port` | `wrap --web` port (default `7681`) |
+| `--api-key` | `wrap --web` API key the browser terminal requires (default: a random key) |
 
 ## Doctor
 

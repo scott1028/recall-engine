@@ -89,23 +89,19 @@ def detect_agent(agent: str) -> str | None:
     return None
 
 
-def launch_agent(
+def build_agent_command(
     repo_path: Path,
     argv: list[str] | None = None,
     agent: str = "claude",
     install_hint: str | None = None,
     pre_args: list[str] | None = None,
-) -> int:
-    """Run the agent command with RECALL_REPO_PATH set; return its exit code.
+) -> tuple[list[str], dict[str, str]]:
+    """Return the (command, env) that runs the agent with RECALL_REPO_PATH set.
 
     Bash file commands are resolved through the user's shell and launched
     directly so interactive TUIs keep a clean foreground terminal. Shell
     functions and aliases fall back to the user's interactive shell so rc-file
     wrappers (e.g. ~/.bashrc.d/claude) still apply.
-    stdin/stdout/stderr are inherited so the interactive TUI works.
-    SIGINT/SIGTERM/SIGHUP are forwarded to the child while it runs; handling
-    SIGHUP keeps this process alive long enough to tear down the injected
-    config when the terminal is closed (default SIGHUP would kill it first).
 
     pre_args are placed before the caller's argv (e.g. agy's `--add-dir
     <project>`, needed for it to see the injected .agents/ config).
@@ -143,6 +139,26 @@ def launch_agent(
         )
     else:
         command = [resolved_file, *(pre_args or []), *(argv or [])]
+    return command, env
+
+
+def launch_agent(
+    repo_path: Path,
+    argv: list[str] | None = None,
+    agent: str = "claude",
+    install_hint: str | None = None,
+    pre_args: list[str] | None = None,
+) -> int:
+    """Run the agent command (see build_agent_command); return its exit code.
+
+    stdin/stdout/stderr are inherited so the interactive TUI works.
+    SIGINT/SIGTERM/SIGHUP are forwarded to the child while it runs; handling
+    SIGHUP keeps this process alive long enough to tear down the injected
+    config when the terminal is closed (default SIGHUP would kill it first).
+    """
+    command, env = build_agent_command(
+        repo_path, argv, agent=agent, install_hint=install_hint, pre_args=pre_args
+    )
     child = subprocess.Popen(command, env=env)
 
     def forward(signum: int, _frame: FrameType | None) -> None:

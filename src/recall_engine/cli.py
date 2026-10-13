@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import secrets
+import urllib.parse
 from pathlib import Path
 from typing import Annotated
 
@@ -15,6 +17,7 @@ from recall_engine.config import ConfigError, resolve_settings
 from recall_engine.doctor import run_doctor
 from recall_engine.launcher import (
     LauncherError,
+    build_agent_command,
     detect_agent,
     launch_agent,
 )
@@ -35,6 +38,7 @@ from recall_engine.skill import (
     inject_skill,
     restore_skill,
 )
+from recall_engine.web_terminal import run_web
 
 KNOWLEDGE_PATH_HELP = (
     "Path to an existing local knowledge directory; its notes are found under "
@@ -107,6 +111,28 @@ def wrap(
     knowledge_path: Annotated[
         list[str] | None, typer.Option("--knowledge-path", help=KNOWLEDGE_PATH_HELP)
     ] = None,
+    web: Annotated[
+        bool,
+        typer.Option(
+            "--web",
+            help="Serve AGENT in a browser terminal instead of this one; each "
+            "browser connection runs its own agent.",
+        ),
+    ] = False,
+    web_host: Annotated[
+        str, typer.Option("--web-host", help="Bind address for --web.")
+    ] = "127.0.0.1",
+    web_port: Annotated[
+        int, typer.Option("--web-port", help="Port for --web.")
+    ] = 7681,
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key",
+            help="API key the --web browser terminal requires; defaults to a "
+            "random key.",
+        ),
+    ] = None,
 ) -> None:
     """Prepare the knowledge paths and launch AGENT (claude/codex/pi/gemini/opencode/agy or a wrapper).
 
@@ -166,13 +192,28 @@ def wrap(
             if AGENTS[family].needs_workspace_dir
             else []
         )
-        exit_code = launch_agent(
-            knowledge_paths[0],
-            argv=agent_args,
-            agent=agent,
-            install_hint=AGENTS[family].install_hint,
-            pre_args=pre_args,
-        )
+        if web:
+            command, env = build_agent_command(
+                knowledge_paths[0],
+                argv=agent_args,
+                agent=agent,
+                install_hint=AGENTS[family].install_hint,
+                pre_args=pre_args,
+            )
+            api_key = api_key or secrets.token_urlsafe(24)
+            typer.echo(
+                f"web terminal: http://{web_host}:{web_port}/"
+                f"?api-key={urllib.parse.quote(api_key, safe='')}"
+            )
+            exit_code = run_web(command, env, web_host, web_port, api_key)
+        else:
+            exit_code = launch_agent(
+                knowledge_paths[0],
+                argv=agent_args,
+                agent=agent,
+                install_hint=AGENTS[family].install_hint,
+                pre_args=pre_args,
+            )
     except (SkillError, SupervisorError, McpConfigError, LauncherError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
